@@ -19,7 +19,6 @@ An insurance company processes claims like this:
 
 
 What "working" means
-
 - A claim can be submitted with line items
 - The system applies coverage rules to determine payable amounts
 - Claims have lifecycle states
@@ -30,5 +29,54 @@ What "working" means
 
 ## Directory Structure
 
-- 'app/' - application code
+- application code in `app/`, tests in `tests/`, config in `config/`
 
+---
+
+## Stack
+
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.13 |
+| Backend API | Flask |
+| Database | SQLite |
+| ORM | Flask-SQLAlchemy |
+| Frontend | Vanilla JavaScript |
+| LLM | OpenRouter |
+| Tooling | Astral ecosystem (uv, ruff) |
+
+---
+
+## Code Standards
+
+- Type hints on all function signatures
+- One module = one responsibility
+- No premature abstractions: don't create templates or helpers that are only used once. Inline values unless they're shared across 2+ call sites.
+- No hardcoded secrets or magic numbers
+- Google-style docstrings on all public functions
+- Use `logging`, never `print()` for diagnostics
+- No bare `except:` — always catch specific exceptions, log meaningful error messages.
+
+---
+
+## Dependencies
+
+- Justify any new dependency before adding it
+- Pin versions in pyproject.toml
+- Use virtual environments. Never install globally
+
+---
+
+## Testing
+
+- Think about how you would verify the working of any code you add - first write the tests and then go about writing the code.
+- Run tests before presenting work as done
+- Ensure that whenever you make a change, you check if any existing tests need to be updated.
+- Run `ruff format`, `ruff check`, and `mypy` before finishing
+
+---
+
+## Git
+
+- Commits: conventional commits format (feat:, fix:, chore:)
+- Suggest a commit message when you are done with a set of changes. Always run `git diff HEAD` and `git status` to see the full picture of all uncommitted changes across the entire repo to suggest a commit message.
