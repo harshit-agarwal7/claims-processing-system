@@ -63,3 +63,19 @@ End with:
 1. A prioritized list of all BLOCKERs that must be resolved before implementation begins.
 2. A list of open questions where the model is ambiguous and a decision is needed.
 3. An overall assessment: is this model ready to implement, or does it need another revision?
+
+---
+
+## 8. Query Efficiency Analysis
+
+1. **Infer common read paths** — what queries will the application need to run given the domain (e.g. "load a claim with all its line items and current adjudication results"). For each, write out the approximate SQL (tables joined, WHERE clauses, ORDER BY).
+
+2. **Infer common write paths** — what INSERTs/UPDATEs/DELETEs will the application need, and in what transactional groupings. Note any ordering constraints (e.g. parent must exist before child).
+
+3. **Recommend indexes** — for each read path, identify which columns need indexes (foreign keys, filter columns, sort columns). Flag any unique constraints mentioned in the model that should be enforced at the DB level.
+
+4. **Flag efficiency risks** — N+1 patterns that are likely given the relationships, queries that will require full scans without indexes, any "get the latest revision" or "get current result" patterns that need special handling.
+
+5. **Summarize** as a prioritized list of index recommendations and query design decisions to make before implementation, so they can be built in from the start rather than retrofitted.
+
+Feel free to recommend a design change if required instead of just focus on index recommendations and query design decisions.
