@@ -1,4 +1,4 @@
-Review the markdown file at docs/data_model.md which defines the domain model for a claims processing system.
+Review the markdown file at docs/domain-model.md which defines the domain model for a claims processing system.
 This model will be directly implemented as database tables (SQLite + SQLAlchemy ORM),
 API endpoints (Flask), and frontend state. Your job is to find every issue that would
 cause problems during implementation or at runtime — before a single line of code is written.

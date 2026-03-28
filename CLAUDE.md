@@ -6,9 +6,9 @@ Members submit claims for reimbursement. The system must determine what's covere
 
 ---
 
-See [docs/domain_concepts.md](docs/domain_concepts.md) for the full domain model and vocabulary.
+See [docs/domain-concepts.md](docs/domain-concepts.md) for the full domain model and vocabulary.
 
-See [docs/acceptance_criteria.md](docs/acceptance_criteria.md) for acceptance criteria and scope boundaries.
+See [docs/acceptance-criteria.md](docs/acceptance-criteria.md) for acceptance criteria and scope boundaries.
 
 ---
 

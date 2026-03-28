@@ -1,7 +1,7 @@
 # Claims Processing System — Domain Concepts
 
 This document defines the core vocabulary and conceptual model for the system.
-Behavioral requirements are in [acceptance_criteria.md](acceptance_criteria.md).
+Behavioral requirements are in [acceptance-criteria.md](acceptance-criteria.md).
 
 ---
 
