@@ -1,4 +1,4 @@
-# Claims Processing System — Data Model Draft
+# Claims Processing System — Data Model
 
 ---
 
