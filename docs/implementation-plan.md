@@ -41,6 +41,7 @@ claims-processing-system/
 │       └── test_disputes_api.py
 ├── config/
 │   └── settings.py                  # Config, TestingConfig classes
+├── migrations/                       # Flask-Migrate managed; do not edit by hand
 ├── app/static/
 │   ├── index.html                   # Dashboard (claim list + submission)
 │   ├── claim.html                   # Claim detail page
@@ -66,6 +67,7 @@ requires-python = ">=3.13"
 dependencies = [
     "flask>=3.1.0",
     "flask-sqlalchemy>=3.1.1",
+    "flask-migrate>=4.0.7",
 ]
 
 [tool.uv]
@@ -104,30 +106,43 @@ class TestingConfig(Config):
 
 ### `app/extensions.py`
 ```python
+from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
+
 db: SQLAlchemy = SQLAlchemy()
+migrate: Migrate = Migrate()
 ```
 
 ### `app/__init__.py` — App factory
 ```python
+import logging
+from decimal import Decimal
+
 from flask import Flask
+from flask.json.provider import DefaultJSONProvider
 from config.settings import Config
-from .extensions import db
+from .extensions import db, migrate
 from .routes import register_routes
 from .errors import register_error_handlers
 
+
+class DecimalJSONProvider(DefaultJSONProvider):
+    def default(self, o: object) -> object:
+        if isinstance(o, Decimal):
+            return str(o)
+        return super().default(o)
+
+
 def create_app(config_object: object = Config) -> Flask:
     app = Flask(__name__, static_folder="static")
+    app.json_provider_class = DecimalJSONProvider
     app.config.from_object(config_object)
     db.init_app(app)
-    with app.app_context():
-        db.create_all()
+    migrate.init_app(app, db)
     register_routes(app)
     register_error_handlers(app)
     return app
 ```
-
----
 
 ## Phase 2: Models
 
@@ -256,21 +271,21 @@ class ForbiddenError(ClaimsError):   # 403, "FORBIDDEN"
 
 All DB writes occur in a **single transaction** (Design Note §1 from domain-model):
 
-1. Lock `Accumulator` row with `with_for_update()` — prevents concurrent double-spend (AC §8)
-2. Transition claim `submitted → under_review`, `INSERT ClaimStatusHistory`
+1. Load `Accumulator` for the claim's policy
+2. Transition claim `submitted → under_review`, `INSERT ClaimStatusHistory`; log at INFO
 3. For each active `LineItem` (ordered by id for determinism):
    - Reset: `adjudication_status = pending`, `latest_result_id = None`
-   - Lookup `CoverageRule` for `(plan_id, cpt_code)` where `deleted_at IS NULL`
+   - Lookup `CoverageRule` for `(plan_id, cpt_code)` where `deleted_at IS NULL` using `.one_or_none()` — raises if duplicate active rules exist
    - If no rule or `is_covered=False` → **denied result**
    - Else → **approved result**: apply adjudication math with `effective_deductible_remaining = plan.deductible - accumulator.deductible_met - total_consumed_this_run`
    - `INSERT AdjudicationResult` (revision = max existing + 1, or 1 if none)
    - `db.session.flush()` to get result.id
-   - Update `LineItem.latest_result_id`, `adjudication_status`
+   - Update `LineItem.latest_result_id`, `adjudication_status`; log adjudication decision at INFO
 4. `UPDATE Accumulator.deductible_met += total_deductible_consumed`
 5. Derive `ClaimStatus` from line item outcomes:
    - All approved → `approved` | All denied → `denied` | Mix → `partially_approved`
-6. Transition `under_review → <final_status>`, `INSERT ClaimStatusHistory`
-7. If `approved`: create `Payment(amount=sum(plan_pays))`, transition to `paid`
+6. Transition `under_review → <final_status>`, `INSERT ClaimStatusHistory`; log at INFO
+7. If `approved`: transition to `paid`, `INSERT ClaimStatusHistory`; create `Payment` only if `sum(plan_pays) > 0.00` (skip when entire billed amount was applied to deductible)
 8. If `partially_approved` AND resolved `Dispute` exists (re-adjudication path): create `Payment`, transition to `paid`
 9. `db.session.commit()`
 
@@ -289,11 +304,24 @@ member_owes = (billed_amount - plan_pays).quantize(Decimal("0.01"), ROUND_HALF_U
 explanation = f"Service {cpt_code} is not covered under your plan."
 # Approved
 explanation = (
-    f"Service {cpt_code} covered at {int(coverage_percentage * 100)}%. "
+    f"Service {cpt_code} covered at {coverage_percentage * 100:.4g}%. "
     f"${applied_to_deductible} applied to deductible. "
     f"Plan pays ${plan_pays}; you owe ${member_owes}."
 )
 ```
+
+**Logging (AC §9):** `logger = logging.getLogger(__name__)` at module level.
+```python
+# After each ClaimStatusHistory insert:
+logger.info("claim %s transitioned %s → %s", claim.id, from_status.value, to_status.value)
+
+# After each AdjudicationResult insert:
+logger.info(
+    "claim %s line_item %s cpt=%s covered=%s applied_deductible=%s plan_pays=%s",
+    claim.id, line_item.id, cpt_code, is_covered, applied_to_deductible, plan_pays,
+)
+```
+Same pattern in `claim_service.py` and `dispute_service.py` — log at INFO on state changes, ERROR (with `exc_info=True`) before re-raising any caught exception.
 
 ---
 
@@ -302,16 +330,17 @@ explanation = (
 ### `app/services/claim_service.py`
 
 **`submit_claim(data: dict) -> Claim`**:
-1. Validate required fields: `member_id`, `provider_id`, `date_of_service`, `line_items` (non-empty; each must have `diagnosis_code`, `cpt_code`, `billed_amount > 0`) — **400** `BadRequestError` on any failure
+1. Validate required fields: `member_id`, `provider_id`, `date_of_service` (must be a valid ISO 8601 date string — raise **400** `BadRequestError` if unparseable), `line_items` (non-empty; each must have `diagnosis_code`, `cpt_code`, `billed_amount > 0`) — **400** `BadRequestError` on any failure
 2. Load Member — 404 if not found or soft-deleted
 3. Find Policy where `member_id` matches, `status=active`, `start_date <= date_of_service <= end_date` — **422** `ValidationError` if none ("No active policy covers this date of service")
 4. Load Provider — 404 if not found
 5. Create `Claim(status=submitted, review_type=auto)` + `LineItem` rows
 6. Create `ClaimStatusHistory(from_status=None, to_status=submitted)`
-7. Upsert `Accumulator` for `(member_id, policy_id)` — create with `deductible_met=0.00` if first claim this period. Each `Policy` row has its own `Accumulator`; creating a new policy for a new period automatically produces a fresh accumulator — the old one is never zeroed, preserving history.
-8. `db.session.commit()`
-9. Call `AdjudicationEngine().run(claim.id)`
-10. Return refreshed claim
+7. `db.session.flush()` — assigns IDs without committing; adjudication engine owns the single commit
+8. Call `AdjudicationEngine().run(claim.id)` — runs adjudication and commits the entire transaction atomically
+9. Return refreshed claim
+
+> `Accumulator` is created by `POST /api/policies` when the policy is created. `submit_claim` does not create or upsert it — the engine loads the existing row in step 1. A missing accumulator is a data integrity error (policy was created incorrectly), not a recoverable condition.
 
 ### `app/services/dispute_service.py`
 
@@ -330,7 +359,7 @@ explanation = (
 2. Load Dispute — 404 if no `Dispute` row exists; **409** `ConflictError` if dispute exists but `status != pending` ("Dispute is already resolved")
 3. Update `Dispute.reviewer_note` if provided
 4. Set `Dispute.status=resolved`, `Dispute.resolved_at=now()`
-5. `db.session.commit()`
+5. `db.session.flush()` — no commit; adjudication engine owns the single commit
 6. Call `AdjudicationEngine().run(claim.id)` — engine auto-pays if result is `partially_approved` (Dispute already resolved, no further dispute possible)
 7. Return refreshed claim
 
@@ -472,7 +501,7 @@ Covers `claim_service.submit_claim` validation at unit level (no HTTP layer):
 - `date_of_service` before `policy.start_date` → `ValidationError`
 - `date_of_service` after `policy.end_date` → `ValidationError`
 - No active policy for member → `ValidationError`
-- Valid submission → returns `Claim` with status `submitted` before adjudication runs
+- Valid submission → patch `AdjudicationEngine.run` with `unittest.mock.patch` to no-op; assert returned `Claim.status == submitted`
 
 ### `tests/unit/test_dispute_service.py`
 
@@ -593,9 +622,9 @@ export const api = {
 
 | Step | What | Why |
 |---|---|---|
-| 1 | `pyproject.toml`, `config/settings.py`, `app/extensions.py`, `app/__init__.py` | Foundation — everything depends on this |
+| 1 | `pyproject.toml`, `config/settings.py`, `app/extensions.py`, `app/errors.py`, `app/__init__.py` | `errors.py` must exist before `__init__.py` imports it |
 | 2 | `app/models.py` — all enums + 12 models | Models before any service or route |
-| 3 | `app/errors.py`, `app/routes/__init__.py` (stub) | Error handling before routes |
+| 3 | `app/routes/__init__.py` (stub); run `flask db init && flask db migrate -m "initial schema" && flask db upgrade` | Establish DB schema via migrations before any service work |
 | 4 | `tests/conftest.py` + seed fixture | Test infrastructure before any test |
 | 5 | `tests/unit/test_adjudication_engine.py` → `app/services/adjudication_engine.py` | Core logic, TDD |
 | 6 | `tests/unit/test_state_machine.py` | Cover full state transition paths through the engine |
@@ -612,6 +641,15 @@ export const api = {
 ```bash
 # Install deps
 uv sync
+
+# Database migrations (first time)
+uv run flask --app "app:create_app()" db init
+uv run flask --app "app:create_app()" db migrate -m "initial schema"
+uv run flask --app "app:create_app()" db upgrade
+
+# Apply new migrations after model changes
+uv run flask --app "app:create_app()" db migrate -m "<description>"
+uv run flask --app "app:create_app()" db upgrade
 
 # Run all tests
 uv run pytest tests/ -v

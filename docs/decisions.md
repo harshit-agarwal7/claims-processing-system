@@ -30,6 +30,7 @@
 - **Supporting document submission** — members do not upload receipts or provider documentation.
 - **Member or provider address storage** — address data plays no role in adjudication and is not stored.
 - **International provider identifiers** — no abstraction for non-US provider ID schemes.
+- **Concurrent claim submission safety** — SQLite does not support `SELECT ... FOR UPDATE`; there is no row-level locking on the `Accumulator`. The system targets single-user / low-concurrency use and does not guarantee correctness under simultaneous submissions.
 
 ---
 
@@ -42,4 +43,3 @@
 - **Plan versioning via new records** — when a plan is updated (e.g. annually), a new `Plan` row is created. Members renewing get a new `Policy` pointing to the new plan. Historical claims remain tied to the plan that was in effect at the time.
 - **US context** — CPT procedure codes and NPI are US-specific standards. The system does not account for international coding or identification schemes.
 - **Monetary amounts as NUMERIC(10,2)** — all money is stored and computed as `Decimal` in Python; `float` is never used.
-- **Deductible tracking is transactional** — reading and updating the `Accumulator` during adjudication happens within a single DB transaction to prevent concurrent claims from double-counting deductible spend.

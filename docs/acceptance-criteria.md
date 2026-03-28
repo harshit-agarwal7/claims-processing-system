@@ -77,7 +77,7 @@
 ## 8. Data Integrity
 - A member cannot submit a claim against a policy they do not hold
 - Monetary amounts are stored and returned to 2 decimal places
-- Concurrent claim submissions do not corrupt deductible tracking
+- Concurrent claim submissions are **not supported** in the current implementation — SQLite does not provide row-level locking; the system targets single-user / low-concurrency use only
 
 ## 9. Observability
 - All state transitions logged at `INFO` level with claim ID and timestamp

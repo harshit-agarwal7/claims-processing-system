@@ -26,6 +26,7 @@ See [docs/acceptance-criteria.md](docs/acceptance-criteria.md) for acceptance cr
 | Backend API | Flask |
 | Database | SQLite |
 | ORM | Flask-SQLAlchemy |
+| Migrations | Flask-Migrate (Alembic) |
 | Frontend | Vanilla JavaScript |
 | LLM | OpenRouter |
 | Tooling | Astral ecosystem (uv, ruff) |
