@@ -1,5 +1,23 @@
 # Claims Processing System — Acceptance Criteria
 
+## 0. Scope
+
+**In scope:**
+- Individual plans only — no family or group plans
+- Each member has exactly one active policy at a time
+- Each member has exactly one insurance (no secondary insurance)
+- Line items adjudicate against the **billed amount**; deductible and coinsurance are calculated against the billed amount
+- Adjudication result records what the plan pays and what the member owes — this single record serves all purposes (no distinction between member-facing and provider-facing documents)
+
+**Out of scope:**
+- Riders / policy add-ons
+- Family or shared deductibles / accumulators
+- Coordination of Benefits (COB) / secondary insurance
+- Distinction between billed amount and contracted/allowed amount
+- Distinction between member-facing EOB and provider-facing remittance advice
+
+---
+
 ## 1. Claim Submission
 - A member can submit a claim with one or more line items
 - Each line item includes: diagnosis code, service type, provider details, and billed amount
