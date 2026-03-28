@@ -56,6 +56,25 @@ claims-processing-system/
 └── .env.example
 ```
 
+---
+
+## Implementation Order
+
+| Phase | What | Why |
+|---|---|---|
+| 1 | `pyproject.toml`, `config/settings.py`, `app/extensions.py`, `app/errors.py`, `app/__init__.py` | Scaffolding; `errors.py` must exist before `__init__.py` imports it |
+| 2 | `app/models.py` — all enums + 12 models | Models before any service or route |
+| 3 | `app/routes/__init__.py` (stub); run migrations | Establish DB schema before any service work |
+| 4 | `tests/conftest.py` + seed fixture | Test infrastructure before any test |
+| 5 | CRUD routes: members, providers, plans, policies + their integration tests | These entities must exist before claims can be submitted or manually smoke-tested |
+| 6 | `tests/unit/test_adjudication_engine.py` → `app/services/adjudication_engine.py`; `tests/unit/test_state_machine.py` | Core logic, TDD |
+| 7 | `tests/unit/test_claim_service.py` → `app/services/claim_service.py` + `tests/integration/test_claims_api.py` + `app/routes/claims.py` | Main claim flow, unit then integration |
+| 8 | `tests/unit/test_dispute_service.py` → `app/services/dispute_service.py` + `tests/integration/test_disputes_api.py` | Dispute + re-adjudication flow, unit then integration |
+| 9 | `ruff format`, `ruff check --fix`, `mypy` | Quality gate |
+| 10 | Frontend: `static/` pages | UI layer |
+
+---
+
 ## Phase 1: Project Scaffolding
 
 ### `pyproject.toml`
@@ -113,6 +132,30 @@ db: SQLAlchemy = SQLAlchemy()
 migrate: Migrate = Migrate()
 ```
 
+### `app/errors.py`
+
+```python
+class ClaimsError(Exception):
+    status_code: int = 500
+    error_code: str = "INTERNAL_ERROR"
+
+class BadRequestError(ClaimsError):  # 400, "BAD_REQUEST"   — malformed input, missing/invalid fields
+class NotFoundError(ClaimsError):    # 404, "NOT_FOUND"
+class ValidationError(ClaimsError):  # 422, "VALIDATION_ERROR" — valid input, business rule violation
+class ConflictError(ClaimsError):    # 409, "CONFLICT"      — operation invalid for current resource state
+class ForbiddenError(ClaimsError):   # 403, "FORBIDDEN"
+```
+
+**When to use each:**
+- `BadRequestError` (400): missing required fields, zero/negative billed amounts, empty line_items list — the request itself is malformed.
+- `ValidationError` (422): structurally valid request that fails a business rule — e.g. no active policy covers the date of service, date of service outside policy period.
+- `ConflictError` (409): the resource exists and is valid, but its current state prevents the operation — e.g. disputing a claim that is already disputed, operating on a claim in the wrong status.
+
+`register_error_handlers(app)` handles all `ClaimsError` subclasses and generic Flask 404/405/500, always returning:
+```json
+{"error": "ERROR_CODE", "message": "Human-readable message"}
+```
+
 ### `app/__init__.py` — App factory
 ```python
 import logging
@@ -143,6 +186,8 @@ def create_app(config_object: object = Config) -> Flask:
     register_error_handlers(app)
     return app
 ```
+
+---
 
 ## Phase 2: Models
 
@@ -235,35 +280,124 @@ Created automatically when claim transitions to `paid`.
 
 ---
 
-## Phase 3: Error Handling
+## Phase 3: Routes Stub + DB Migrations
 
-### `app/errors.py`
+### `app/routes/__init__.py` (stub)
 
 ```python
-class ClaimsError(Exception):
-    status_code: int = 500
-    error_code: str = "INTERNAL_ERROR"
+from flask import Flask
 
-class BadRequestError(ClaimsError):  # 400, "BAD_REQUEST"   — malformed input, missing/invalid fields
-class NotFoundError(ClaimsError):    # 404, "NOT_FOUND"
-class ValidationError(ClaimsError):  # 422, "VALIDATION_ERROR" — valid input, business rule violation
-class ConflictError(ClaimsError):    # 409, "CONFLICT"      — operation invalid for current resource state
-class ForbiddenError(ClaimsError):   # 403, "FORBIDDEN"
+def register_routes(app: Flask) -> None:
+    pass
 ```
 
-**When to use each:**
-- `BadRequestError` (400): missing required fields, zero/negative billed amounts, empty line_items list — the request itself is malformed.
-- `ValidationError` (422): structurally valid request that fails a business rule — e.g. no active policy covers the date of service, date of service outside policy period.
-- `ConflictError` (409): the resource exists and is valid, but its current state prevents the operation — e.g. disputing a claim that is already disputed, operating on a claim in the wrong status.
+Run migrations to establish the DB schema before any service work:
 
-`register_error_handlers(app)` handles all `ClaimsError` subclasses and generic Flask 404/405/500, always returning:
-```json
-{"error": "ERROR_CODE", "message": "Human-readable message"}
+```bash
+uv run flask --app "app:create_app()" db init
+uv run flask --app "app:create_app()" db migrate -m "initial schema"
+uv run flask --app "app:create_app()" db upgrade
+```
+
+To apply new migrations after model changes:
+
+```bash
+uv run flask --app "app:create_app()" db migrate -m "<description>"
+uv run flask --app "app:create_app()" db upgrade
 ```
 
 ---
 
-## Phase 4: Adjudication Engine (Critical — TDD)
+## Phase 4: Test Infrastructure
+
+### `tests/conftest.py`
+```python
+@pytest.fixture
+def app():
+    from config.settings import TestingConfig
+    app = create_app(TestingConfig)
+    with app.app_context():
+        db.create_all()
+        yield app
+        db.drop_all()
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+@pytest.fixture
+def seed(app):
+    """
+    Creates and returns a SimpleNamespace with:
+      .plan       — Plan(deductible=500.00)
+      .rule       — CoverageRule(cpt_code="99213", is_covered=True, coverage_percentage=0.8)
+      .member     — Member
+      .provider   — Provider
+      .policy     — Policy(status=active, covers 2026-01-01 to 2026-12-31)
+      .accumulator — Accumulator(deductible_met=0.00)
+    """
+```
+
+---
+
+## Phase 5: CRUD Routes + Tests
+
+Implement member, provider, plan, and policy endpoints first so the supporting data exists before claims are submitted or manually smoke-tested. Each blueprint registers itself in `app/routes/__init__.py`.
+
+| Method | Path | Handler | Response |
+|--------|------|---------|----------|
+| POST | `/api/members` | create member | 201 |
+| GET | `/api/members/<id>` | get member | 200 / 404 |
+| GET | `/api/members/<id>/claims` | list member claims (summary) | 200 |
+| GET | `/api/members/<id>/policies/active` | get active policy | 200 / 404 |
+| POST | `/api/providers` | create provider | 201 |
+| GET | `/api/providers/<id>` | get provider | 200 / 404 |
+| POST | `/api/plans` | create plan + coverage rules | 201 |
+| GET | `/api/plans/<id>` | get plan + active rules | 200 / 404 |
+| PUT | `/api/plans/<id>/coverage-rules/<cpt_code>` | upsert rule (soft-delete old, insert new) | 200 |
+| DELETE | `/api/plans/<id>/coverage-rules/<cpt_code>` | soft-delete rule | 204 |
+| POST | `/api/policies` | create policy (creates Accumulator) | 201 |
+| GET | `/api/policies/<id>` | get policy | 200 / 404 |
+
+Integration test files: `tests/integration/test_members_api.py`, `tests/integration/test_plans_api.py`, `tests/integration/test_policies_api.py`.
+
+---
+
+## Phase 6: Adjudication Engine (Critical — TDD)
+
+Write `tests/unit/test_adjudication_engine.py` and `tests/unit/test_state_machine.py` first, then implement `app/services/adjudication_engine.py` until all tests pass.
+
+### `tests/unit/test_adjudication_engine.py`
+
+Covers all adjudication math and deductible tracking. Tests call the engine directly against an in-memory DB with seed data.
+
+**Math scenarios:**
+| Scenario | billed | deductible | met_before | applied | plan_pays | member_owes |
+|---|---|---|---|---|---|---|
+| Full deductible remaining | 150 | 500 | 0 | 150 | 0 | 150 |
+| Partial deductible remaining | 300 | 500 | 300 | 200 | 80 | 220 |
+| Deductible fully met | 200 | 500 | 500 | 0 | 160 | 40 |
+| CPT not covered (is_covered=False) | 200 | 500 | 0 | 0 | 0 | 200 |
+| CPT absent from plan | 200 | 500 | 0 | 0 | 0 | 200 |
+| Multi-item: 3 items, deductible consumed across them | — | 500 | 0 | per-item cumulative | — | — |
+
+**Deductible tracking scenarios:**
+- Claim 1 consumes $300 of $500 deductible → `accumulator.deductible_met = $300`
+- Claim 2 (same period) applies remaining $200, then coverage kicks in
+- New policy period → new `Policy` row → fresh `Accumulator` starts at `$0`; old accumulator unchanged
+
+### `tests/unit/test_state_machine.py`
+
+Covers full end-to-end state transitions through the engine and dispute service:
+- All approved → `approved` → auto `paid`, Payment created
+- All denied → `denied`, no Payment
+- Mixed → `partially_approved`, no Payment
+- `partially_approved` → dispute → `under_review` (review_type=manual)
+- `under_review` (manual) → re-adjudicate → `approved` → auto `paid`
+- `under_review` (manual) → re-adjudicate → `partially_approved` → auto `paid` (Dispute resolved)
+- `denied` → dispute → `under_review` → re-adjudicate → `approved` → `paid`
+- Second dispute attempt → `ConflictError`
+- Dispute on `approved` claim → `ConflictError`
 
 ### `app/services/adjudication_engine.py`
 
@@ -325,7 +459,33 @@ Same pattern in `claim_service.py` and `dispute_service.py` — log at INFO on s
 
 ---
 
-## Phase 5: Services
+## Phase 7: Claim Flow (TDD)
+
+Write tests first (`test_claim_service.py`, `test_claims_api.py`), then implement `claim_service.py` and `claims.py` until all tests pass.
+
+### `tests/unit/test_claim_service.py`
+
+Covers `claim_service.submit_claim` validation at unit level (no HTTP layer):
+- Missing `member_id` → `BadRequestError`
+- Missing `line_items` / empty list → `BadRequestError`
+- `billed_amount = 0` or negative → `BadRequestError`
+- Unknown `member_id` → `NotFoundError`
+- Unknown `provider_id` → `NotFoundError`
+- `date_of_service` before `policy.start_date` → `ValidationError`
+- `date_of_service` after `policy.end_date` → `ValidationError`
+- No active policy for member → `ValidationError`
+- Valid submission → patch `AdjudicationEngine.run` with `unittest.mock.patch` to no-op; assert returned `Claim.status == submitted`
+
+### `tests/integration/test_claims_api.py`
+
+- `POST /api/claims` happy path → 201, status is `approved`/`denied`/`partially_approved`/`paid`, adjudication_result populated
+- Missing `member_id` → **400**
+- Unknown `member_id` → 404
+- `date_of_service` before `policy.start_date` → **422**
+- `date_of_service` after `policy.end_date` → **422**
+- `line_items` empty list → **400**
+- `billed_amount` = 0 → **400**
+- Two sequential claims in same period: deductible correctly carried in second claim
 
 ### `app/services/claim_service.py`
 
@@ -342,54 +502,10 @@ Same pattern in `claim_service.py` and `dispute_service.py` — log at INFO on s
 
 > `Accumulator` is created by `POST /api/policies` when the policy is created. `submit_claim` does not create or upsert it — the engine loads the existing row in step 1. A missing accumulator is a data integrity error (policy was created incorrectly), not a recoverable condition.
 
-### `app/services/dispute_service.py`
-
-**`submit_dispute(claim_id: str, reason: str) -> Dispute`**:
-1. Load Claim — 404 if not found
-2. Guard: `claim.status` must be `denied` or `partially_approved` — **409** `ConflictError` otherwise ("Cannot dispute a claim with status {status}")
-3. Guard: no existing `Dispute` row for this claim — **409** `ConflictError` if one exists ("Claim has already been disputed")
-4. Create `Dispute(reason=reason, status=pending)`
-5. Set `claim.review_type = manual`
-6. Transition claim to `under_review`, `INSERT ClaimStatusHistory`
-7. Reset all active LineItems: `adjudication_status=pending`, `latest_result_id=None`
-8. `db.session.commit()`
-
-**`trigger_readjudication(claim_id: str, reviewer_note: str | None) -> Claim`**:
-1. Load Claim — must be `under_review` with `review_type=manual` — **409** `ConflictError` otherwise ("Claim is not awaiting manual review")
-2. Load Dispute — 404 if no `Dispute` row exists; **409** `ConflictError` if dispute exists but `status != pending` ("Dispute is already resolved")
-3. Update `Dispute.reviewer_note` if provided
-4. Set `Dispute.status=resolved`, `Dispute.resolved_at=now()`
-5. `db.session.flush()` — no commit; adjudication engine owns the single commit
-6. Call `AdjudicationEngine().run(claim.id)` — engine auto-pays if result is `partially_approved` (Dispute already resolved, no further dispute possible)
-7. Return refreshed claim
-
-**`accept_payment(claim_id: str) -> Payment`**:
-1. Load Claim — must be `partially_approved` — **409** `ConflictError` otherwise ("Cannot accept payment for a claim with status {status}")
-2. Guard: no `Dispute` row exists — **409** `ConflictError` if one does ("Dispute already filed; cannot accept partial payment")
-3. Create `Payment(amount=sum(plan_pays for approved line items))`
-4. Transition claim to `paid`, `INSERT ClaimStatusHistory`
-5. `db.session.commit()`
-
----
-
-## Phase 6: API Routes
-
-All endpoints return `application/json`. Errors: `{"error": "CODE", "message": "..."}`.
+### `app/routes/claims.py`
 
 | Method | Path | Handler | Response |
 |--------|------|---------|----------|
-| POST | `/api/members` | create member | 201 |
-| GET | `/api/members/<id>` | get member | 200 / 404 |
-| GET | `/api/members/<id>/claims` | list member claims (summary) | 200 |
-| GET | `/api/members/<id>/policies/active` | get active policy | 200 / 404 |
-| POST | `/api/providers` | create provider | 201 |
-| GET | `/api/providers/<id>` | get provider | 200 / 404 |
-| POST | `/api/plans` | create plan + coverage rules | 201 |
-| GET | `/api/plans/<id>` | get plan + active rules | 200 / 404 |
-| PUT | `/api/plans/<id>/coverage-rules/<cpt_code>` | upsert rule (soft-delete old, insert new) | 200 |
-| DELETE | `/api/plans/<id>/coverage-rules/<cpt_code>` | soft-delete rule | 204 |
-| POST | `/api/policies` | create policy (creates Accumulator) | 201 |
-| GET | `/api/policies/<id>` | get policy | 200 / 404 |
 | POST | `/api/claims` | submit + auto-adjudicate | 201 (full detail) |
 | GET | `/api/claims/<id>` | get full claim detail | 200 / 404 |
 | POST | `/api/claims/<id>/disputes` | submit dispute | 201 |
@@ -398,7 +514,7 @@ All endpoints return `application/json`. Errors: `{"error": "CODE", "message": "
 | POST | `/api/claims/<id>/accept` | accept partial payment | 200 |
 | GET | `/api/claims/<id>/payment` | get payment | 200 / 404 |
 
-### Full Claim Detail Response Shape (`GET /api/claims/<id>`)
+**Full Claim Detail Response Shape (`GET /api/claims/<id>`):**
 ```json
 {
   "id": "...",
@@ -441,67 +557,9 @@ All endpoints return `application/json`. Errors: `{"error": "CODE", "message": "
 
 ---
 
-## Phase 7: Tests
+## Phase 8: Dispute Flow (TDD)
 
-### `tests/conftest.py`
-```python
-@pytest.fixture
-def app():
-    from config.settings import TestingConfig
-    app = create_app(TestingConfig)
-    with app.app_context():
-        db.create_all()
-        yield app
-        db.drop_all()
-
-@pytest.fixture
-def client(app):
-    return app.test_client()
-
-@pytest.fixture
-def seed(app):
-    """
-    Creates and returns a SimpleNamespace with:
-      .plan       — Plan(deductible=500.00)
-      .rule       — CoverageRule(cpt_code="99213", is_covered=True, coverage_percentage=0.8)
-      .member     — Member
-      .provider   — Provider
-      .policy     — Policy(status=active, covers 2026-01-01 to 2026-12-31)
-      .accumulator — Accumulator(deductible_met=0.00)
-    """
-```
-
-### `tests/unit/test_adjudication_engine.py`
-
-Covers all adjudication math and deductible tracking. Tests call the engine directly against an in-memory DB with seed data.
-
-**Math scenarios:**
-| Scenario | billed | deductible | met_before | applied | plan_pays | member_owes |
-|---|---|---|---|---|---|---|
-| Full deductible remaining | 150 | 500 | 0 | 150 | 0 | 150 |
-| Partial deductible remaining | 300 | 500 | 300 | 200 | 80 | 220 |
-| Deductible fully met | 200 | 500 | 500 | 0 | 160 | 40 |
-| CPT not covered (is_covered=False) | 200 | 500 | 0 | 0 | 0 | 200 |
-| CPT absent from plan | 200 | 500 | 0 | 0 | 0 | 200 |
-| Multi-item: 3 items, deductible consumed across them | — | 500 | 0 | per-item cumulative | — | — |
-
-**Deductible tracking scenarios:**
-- Claim 1 consumes $300 of $500 deductible → `accumulator.deductible_met = $300`
-- Claim 2 (same period) applies remaining $200, then coverage kicks in
-- New policy period → new `Policy` row → fresh `Accumulator` starts at `$0`; old accumulator unchanged
-
-### `tests/unit/test_claim_service.py`
-
-Covers `claim_service.submit_claim` validation at unit level (no HTTP layer):
-- Missing `member_id` → `BadRequestError`
-- Missing `line_items` / empty list → `BadRequestError`
-- `billed_amount = 0` or negative → `BadRequestError`
-- Unknown `member_id` → `NotFoundError`
-- Unknown `provider_id` → `NotFoundError`
-- `date_of_service` before `policy.start_date` → `ValidationError`
-- `date_of_service` after `policy.end_date` → `ValidationError`
-- No active policy for member → `ValidationError`
-- Valid submission → patch `AdjudicationEngine.run` with `unittest.mock.patch` to no-op; assert returned `Claim.status == submitted`
+Write tests first (`test_dispute_service.py`, `test_disputes_api.py`), then implement `dispute_service.py` until all tests pass.
 
 ### `tests/unit/test_dispute_service.py`
 
@@ -515,30 +573,6 @@ Covers `dispute_service` validation at unit level:
 - `accept_payment` on `denied` claim → `ConflictError`
 - `accept_payment` when dispute already filed → `ConflictError`
 
-### `tests/unit/test_state_machine.py`
-
-Covers full end-to-end state transitions through the engine and dispute service:
-- All approved → `approved` → auto `paid`, Payment created
-- All denied → `denied`, no Payment
-- Mixed → `partially_approved`, no Payment
-- `partially_approved` → dispute → `under_review` (review_type=manual)
-- `under_review` (manual) → re-adjudicate → `approved` → auto `paid`
-- `under_review` (manual) → re-adjudicate → `partially_approved` → auto `paid` (Dispute resolved)
-- `denied` → dispute → `under_review` → re-adjudicate → `approved` → `paid`
-- Second dispute attempt → `ConflictError`
-- Dispute on `approved` claim → `ConflictError`
-
-### `tests/integration/test_claims_api.py`
-
-- `POST /api/claims` happy path → 201, status is `approved`/`denied`/`partially_approved`/`paid`, adjudication_result populated
-- Missing `member_id` → **400**
-- Unknown `member_id` → 404
-- `date_of_service` before `policy.start_date` → **422**
-- `date_of_service` after `policy.end_date` → **422**
-- `line_items` empty list → **400**
-- `billed_amount` = 0 → **400**
-- Two sequential claims in same period: deductible correctly carried in second claim
-
 ### `tests/integration/test_disputes_api.py`
 
 - `POST /api/claims/<id>/disputes` on `denied` claim → 201, claim now `under_review`
@@ -550,9 +584,49 @@ Covers full end-to-end state transitions through the engine and dispute service:
 - `POST /api/claims/<id>/accept` on `partially_approved` (no dispute) → 200, Payment created, status=`paid`
 - `POST /api/claims/<id>/accept` on `partially_approved` (dispute exists) → **409**
 
+### `app/services/dispute_service.py`
+
+**`submit_dispute(claim_id: str, reason: str) -> Dispute`**:
+1. Load Claim — 404 if not found
+2. Guard: `claim.status` must be `denied` or `partially_approved` — **409** `ConflictError` otherwise ("Cannot dispute a claim with status {status}")
+3. Guard: no existing `Dispute` row for this claim — **409** `ConflictError` if one exists ("Claim has already been disputed")
+4. Create `Dispute(reason=reason, status=pending)`
+5. Set `claim.review_type = manual`
+6. Transition claim to `under_review`, `INSERT ClaimStatusHistory`
+7. Reset all active LineItems: `adjudication_status=pending`, `latest_result_id=None`
+8. `db.session.commit()`
+
+**`trigger_readjudication(claim_id: str, reviewer_note: str | None) -> Claim`**:
+1. Load Claim — must be `under_review` with `review_type=manual` — **409** `ConflictError` otherwise ("Claim is not awaiting manual review")
+2. Load Dispute — 404 if no `Dispute` row exists; **409** `ConflictError` if dispute exists but `status != pending` ("Dispute is already resolved")
+3. Update `Dispute.reviewer_note` if provided
+4. Set `Dispute.status=resolved`, `Dispute.resolved_at=now()`
+5. `db.session.flush()` — no commit; adjudication engine owns the single commit
+6. Call `AdjudicationEngine().run(claim.id)` — engine auto-pays if result is `partially_approved` (Dispute already resolved, no further dispute possible)
+7. Return refreshed claim
+
+**`accept_payment(claim_id: str) -> Payment`**:
+1. Load Claim — must be `partially_approved` — **409** `ConflictError` otherwise ("Cannot accept payment for a claim with status {status}")
+2. Guard: no `Dispute` row exists — **409** `ConflictError` if one does ("Dispute already filed; cannot accept partial payment")
+3. Create `Payment(amount=sum(plan_pays for approved line items))`
+4. Transition claim to `paid`, `INSERT ClaimStatusHistory`
+5. `db.session.commit()`
+
 ---
 
-## Phase 8: Frontend (Vanilla JS)
+## Phase 9: Quality Gate
+
+```bash
+uv run ruff format app/ tests/
+uv run ruff check app/ tests/
+uv run mypy app/
+```
+
+All three must pass clean before proceeding to the frontend.
+
+---
+
+## Phase 10: Frontend (Vanilla JS)
 
 ### `index.html` — Dashboard
 - Member ID input + "Load Claims" button
@@ -618,48 +692,14 @@ export const api = {
 
 ---
 
-## Implementation Order
-
-| Step | What | Why |
-|---|---|---|
-| 1 | `pyproject.toml`, `config/settings.py`, `app/extensions.py`, `app/errors.py`, `app/__init__.py` | `errors.py` must exist before `__init__.py` imports it |
-| 2 | `app/models.py` — all enums + 12 models | Models before any service or route |
-| 3 | `app/routes/__init__.py` (stub); run `flask db init && flask db migrate -m "initial schema" && flask db upgrade` | Establish DB schema via migrations before any service work |
-| 4 | `tests/conftest.py` + seed fixture | Test infrastructure before any test |
-| 5 | `tests/unit/test_adjudication_engine.py` → `app/services/adjudication_engine.py` | Core logic, TDD |
-| 6 | `tests/unit/test_state_machine.py` | Cover full state transition paths through the engine |
-| 7 | `tests/unit/test_claim_service.py` → `app/services/claim_service.py` + `tests/integration/test_claims_api.py` + `app/routes/claims.py` | Main claim flow, unit then integration |
-| 8 | `tests/unit/test_dispute_service.py` → `app/services/dispute_service.py` + `tests/integration/test_disputes_api.py` | Dispute + re-adjudication flow, unit then integration |
-| 9 | Remaining routes (members, providers, plans, policies) + their integration tests | CRUD endpoints |
-| 10 | `ruff format`, `ruff check --fix`, `mypy` | Quality gate |
-| 11 | Frontend: `static/` pages | UI layer |
-
----
-
 ## Verification
 
 ```bash
 # Install deps
 uv sync
 
-# Database migrations (first time)
-uv run flask --app "app:create_app()" db init
-uv run flask --app "app:create_app()" db migrate -m "initial schema"
-uv run flask --app "app:create_app()" db upgrade
-
-# Apply new migrations after model changes
-uv run flask --app "app:create_app()" db migrate -m "<description>"
-uv run flask --app "app:create_app()" db upgrade
-
 # Run all tests
 uv run pytest tests/ -v
-
-# Type check
-uv run mypy app/
-
-# Lint + format
-uv run ruff check app/ tests/
-uv run ruff format app/ tests/
 
 # Run server
 uv run flask --app "app:create_app()" run
