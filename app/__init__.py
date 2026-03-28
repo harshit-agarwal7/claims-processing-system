@@ -46,6 +46,8 @@ def create_app(config_object: object = Config) -> Flask:
     db.init_app(app)
     migrate.init_app(app, db)
 
+    from . import models  # noqa: F401 — registers models with SQLAlchemy metadata
+
     register_routes(app)
     register_error_handlers(app)
 

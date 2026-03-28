@@ -1,5 +1,11 @@
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm import DeclarativeBase
 
-db: SQLAlchemy = SQLAlchemy()
+
+class Base(DeclarativeBase):
+    """Declarative base for all ORM models."""
+
+
+db: SQLAlchemy = SQLAlchemy(model_class=Base)
 migrate: Migrate = Migrate()
