@@ -20,7 +20,7 @@
 
 ## 1. Claim Submission
 - A member can submit a claim with one or more line items
-- Each line item includes: diagnosis code, service type, provider details, and billed amount
+- Each line item includes: diagnosis code (ICD-10), procedure code (CPT), and billed amount; provider details are on the claim
 - Submission returns a unique claim ID and initial status of `submitted`
 - Invalid submissions (missing required fields, unknown member/policy) are rejected with clear error messages
 

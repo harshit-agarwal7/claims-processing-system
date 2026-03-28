@@ -65,3 +65,8 @@ See [docs/acceptance_criteria.md](docs/acceptance_criteria.md) for acceptance cr
 
 - Commits: conventional commits format (feat:, fix:, chore:)
 - Suggest a commit message when you are done with a set of changes. Always run `git diff HEAD` and `git status` to see the full picture of all uncommitted changes across the entire repo to suggest a commit message.
+
+## Documentation
+ 
+- Document what is included in the scope and left out of the scope along with any assumptions made in `docs/decisions.md`. Ensure that there is no duplication in the content of the file with time.
+
