@@ -1,0 +1,876 @@
+diff --git a/app/models.py b/app/models.py
+index 7b0618b..2138b8b 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -12,6 +12,7 @@ from datetime import date, datetime
+ from decimal import Decimal
+ 
+ from sqlalchemy import (
++    JSON,
+     Boolean,
+     CheckConstraint,
+     Date,
+@@ -379,6 +380,7 @@ class Dispute(Base):
+         Enum(DisputeStatus), nullable=False, default=DisputeStatus.pending
+     )
+     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
++    line_item_updates: Mapped[list[dict[str, object]] | None] = mapped_column(JSON, nullable=True)
+ 
+     claim: Mapped[Claim] = relationship("Claim", back_populates="dispute")
+ 
+diff --git a/app/routes/claims.py b/app/routes/claims.py
+index 4a30591..ff8cf42 100644
+--- a/app/routes/claims.py
++++ b/app/routes/claims.py
+@@ -87,6 +87,7 @@ def _serialize_dispute(dispute: Dispute) -> dict[str, object]:
+         "submitted_at": dispute.submitted_at.isoformat(),
+         "resolved_at": dispute.resolved_at.isoformat() if dispute.resolved_at else None,
+         "reviewer_note": dispute.reviewer_note,
++        "line_item_updates": dispute.line_item_updates,
+     }
+ 
+ 
+@@ -233,7 +234,8 @@ def submit_dispute(claim_id: str) -> tuple[Response, int]:
+     reason: str = data.get("reason") or ""
+     if not reason:
+         raise BadRequestError("reason is required")
+-    dispute = dispute_service.submit_dispute(claim_id, reason)
++    line_item_updates: list[dict[str, object]] | None = data.get("line_item_updates") or None
++    dispute = dispute_service.submit_dispute(claim_id, reason, line_item_updates)
+     return jsonify(_serialize_dispute(dispute)), 201
+ 
+ 
+diff --git a/app/services/dispute_service.py b/app/services/dispute_service.py
+index 7906926..05050e8 100644
+--- a/app/services/dispute_service.py
++++ b/app/services/dispute_service.py
+@@ -4,7 +4,7 @@ import logging
+ from datetime import datetime
+ from decimal import Decimal
+ 
+-from app.errors import ConflictError, NotFoundError
++from app.errors import BadRequestError, ConflictError, NotFoundError
+ from app.extensions import db
+ from app.models import (
+     Claim,
+@@ -20,15 +20,27 @@ from app.models import (
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def submit_dispute(claim_id: str, reason: str) -> Dispute:
++def submit_dispute(
++    claim_id: str,
++    reason: str,
++    line_item_updates: list[dict[str, object]] | None = None,
++) -> Dispute:
+     """Submit a dispute for a denied or partially-approved claim.
+ 
+     Transitions the claim to ``under_review`` with ``review_type=manual`` and
+     creates a ``Dispute`` row with ``status=pending``.
+ 
++    If *line_item_updates* is provided, the corrections are applied to the
++    matching ``LineItem`` rows in-place before the status transition, so that
++    re-adjudication uses the corrected data automatically.
++
+     Args:
+         claim_id: UUID string of the claim to dispute.
+         reason: The member's reason for disputing the claim.
++        line_item_updates: Optional list of per-line-item corrections.  Each
++            entry must include ``line_item_id`` and at least one of
++            ``billed_amount`` (positive Decimal-compatible string) or
++            ``cpt_code`` (non-empty string).
+ 
+     Returns:
+         The newly created Dispute.
+@@ -38,6 +50,8 @@ def submit_dispute(claim_id: str, reason: str) -> Dispute:
+         ConflictError: If the claim status does not allow a dispute (not
+             ``denied`` or ``partially_approved``), or if the claim has already
+             been disputed.
++        BadRequestError: If any *line_item_id* does not belong to the claim,
++            *billed_amount* is not positive, or *cpt_code* is empty.
+     """
+     claim: Claim | None = db.session.get(Claim, claim_id)
+     if claim is None:
+@@ -54,8 +68,67 @@ def submit_dispute(claim_id: str, reason: str) -> Dispute:
+ 
+     old_status = claim.status
+     claim.status = ClaimStatus.under_review
+-    claim.review_type = ReviewType.manual
+ 
++    if line_item_updates:
++        # Apply corrections in-place so re-adjudication uses the corrected data.
++        # Only provided fields are updated; omitted fields retain their current values.
++        li_index = {li.id: li for li in claim.line_items if li.deleted_at is None}
++        for upd in line_item_updates:
++            li_id = upd.get("line_item_id")
++            if not li_id or li_id not in li_index:
++                raise BadRequestError(f"Line item {li_id!r} does not belong to claim {claim_id!r}")
++            li = li_index[str(li_id)]
++            if "billed_amount" in upd:
++                try:
++                    amount = Decimal(str(upd["billed_amount"]))
++                except Exception:
++                    raise BadRequestError("billed_amount must be a valid number")
++                if amount <= Decimal("0"):
++                    raise BadRequestError("billed_amount must be greater than 0")
++                li.billed_amount = amount
++            if "cpt_code" in upd:
++                cpt = str(upd["cpt_code"]).strip()
++                if not cpt:
++                    raise BadRequestError("cpt_code must be a non-empty string")
++                li.cpt_code = cpt
++
++        # Corrections provided — auto-adjudicate immediately; no manual review needed.
++        claim.review_type = ReviewType.auto
++        db.session.add(
++            ClaimStatusHistory(
++                claim_id=claim.id,
++                from_status=old_status,
++                to_status=ClaimStatus.under_review,
++                note="Dispute submitted by member with corrections; auto-adjudicating.",
++            )
++        )
++        dispute = Dispute(
++            claim_id=claim.id,
++            reason=reason,
++            line_item_updates=line_item_updates,
++            status=DisputeStatus.resolved,
++            resolved_at=datetime.utcnow(),
++        )
++        # Assign via relationship so SQLAlchemy back-populates claim.dispute in-memory,
++        # allowing the adjudication engine to detect the resolved dispute in step 8.
++        claim.dispute = dispute
++        db.session.flush()
++
++        # Import here to avoid circular imports at module load time
++        from app.services.adjudication_engine import AdjudicationEngine
++
++        AdjudicationEngine().run(claim.id)
++
++        db.session.refresh(dispute)
++        logger.info(
++            "claim %s dispute with corrections submitted; auto-adjudicated; final status=%s",
++            claim.id,
++            claim.status.value,
++        )
++        return dispute
++
++    # No corrections — manual review required.
++    claim.review_type = ReviewType.manual
+     db.session.add(
+         ClaimStatusHistory(
+             claim_id=claim.id,
+@@ -64,8 +137,11 @@ def submit_dispute(claim_id: str, reason: str) -> Dispute:
+             note="Dispute submitted by member.",
+         )
+     )
+-
+-    dispute = Dispute(claim_id=claim.id, reason=reason)
++    dispute = Dispute(
++        claim_id=claim.id,
++        reason=reason,
++        line_item_updates=None,
++    )
+     db.session.add(dispute)
+     db.session.commit()
+ 
+diff --git a/app/static/js/admin.js b/app/static/js/admin.js
+index bb58541..483d933 100644
+--- a/app/static/js/admin.js
++++ b/app/static/js/admin.js
+@@ -439,6 +439,25 @@ function renderDisputeCard(claim) {
+                 <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">DISPUTE REASON</div>
+                 <div>${d.reason}</div>
+             </div>
++            ${d.line_item_updates && d.line_item_updates.length > 0 ? `
++            <div style="margin-bottom:10px">
++                <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">MEMBER CORRECTIONS</div>
++                <div class="table-wrap">
++                    <table>
++                        <thead>
++                            <tr><th>Line Item</th><th>Corrected CPT</th><th>Corrected Amount</th></tr>
++                        </thead>
++                        <tbody>
++                            ${d.line_item_updates.map(u => `
++                                <tr>
++                                    <td class="id-mono">${u.line_item_id.slice(0, 8)}…</td>
++                                    <td class="text-mono">${u.cpt_code ?? "—"}</td>
++                                    <td class="text-mono">${u.billed_amount != null ? "$" + parseFloat(u.billed_amount).toFixed(2) : "—"}</td>
++                                </tr>`).join("")}
++                        </tbody>
++                    </table>
++                </div>
++            </div>` : ""}
+             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+                 Submitted: ${new Date(d.submitted_at).toLocaleString()}
+             </div>
+diff --git a/app/static/js/api.js b/app/static/js/api.js
+index 5c95cbd..b4cf12f 100644
+--- a/app/static/js/api.js
++++ b/app/static/js/api.js
+@@ -39,7 +39,13 @@ export const api = {
+     submitClaim: (data) => request("POST", "/claims", data),
+     getClaim: (id) => request("GET", `/claims/${id}`),
+     listDisputedClaims: () => request("GET", "/claims?disputed=true"),
+-    submitDispute: (id, reason) => request("POST", `/claims/${id}/disputes`, { reason }),
++    submitDispute: (id, reason, lineItemUpdates = null) =>
++        request("POST", `/claims/${id}/disputes`, {
++            reason,
++            ...(lineItemUpdates && lineItemUpdates.length > 0
++                ? { line_item_updates: lineItemUpdates }
++                : {}),
++        }),
+     adjudicate: (id, reviewerNote) => request("POST", `/claims/${id}/adjudicate`, { reviewer_note: reviewerNote }),
+     acceptPayment: (id) => request("POST", `/claims/${id}/accept`),
+     getPayment: (id) => request("GET", `/claims/${id}/payment`),
+diff --git a/app/static/js/claim-detail.js b/app/static/js/claim-detail.js
+index 5db8883..14c9c53 100644
+--- a/app/static/js/claim-detail.js
++++ b/app/static/js/claim-detail.js
+@@ -172,6 +172,30 @@ function renderActionSections(claim) {
+         sections.push(`
+             <div class="card" id="dispute-card">
+                 <div class="card__title">Submit Dispute</div>
++                <div style="margin-bottom:16px">
++                    <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:8px">LINE ITEM CORRECTIONS (optional)</div>
++                    <div class="table-wrap">
++                        <table>
++                            <thead>
++                                <tr>
++                                    <th>CPT Code</th>
++                                    <th class="text-right">Billed</th>
++                                    <th>Corrected CPT</th>
++                                    <th>Corrected Amount</th>
++                                </tr>
++                            </thead>
++                            <tbody>
++                                ${claim.line_items.map(li => `
++                                    <tr>
++                                        <td class="text-mono">${li.cpt_code}</td>
++                                        <td class="text-right text-mono">${fmt(li.billed_amount)}</td>
++                                        <td><input class="form-control li-cpt-input" data-li-id="${li.id}" placeholder="${li.cpt_code}" style="width:110px"></td>
++                                        <td><input class="form-control li-amount-input" data-li-id="${li.id}" type="number" min="0.01" step="0.01" placeholder="${parseFloat(li.billed_amount).toFixed(2)}" style="width:120px"></td>
++                                    </tr>`).join("")}
++                            </tbody>
++                        </table>
++                    </div>
++                </div>
+                 <div class="form-group">
+                     <label for="dispute-reason">Reason</label>
+                     <textarea id="dispute-reason" class="form-control" rows="3"
+@@ -198,6 +222,23 @@ function renderActionSections(claim) {
+                     <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">REASON</div>
+                     <div>${claim.dispute.reason}</div>
+                 </div>
++                ${claim.dispute.line_item_updates && claim.dispute.line_item_updates.length > 0 ? `
++                <div style="margin-top:10px">
++                    <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">MEMBER CORRECTIONS</div>
++                    <div class="table-wrap">
++                        <table>
++                            <thead><tr><th>Line Item</th><th>Corrected CPT</th><th>Corrected Amount</th></tr></thead>
++                            <tbody>
++                                ${claim.dispute.line_item_updates.map(u => `
++                                    <tr>
++                                        <td class="id-mono">${u.line_item_id.slice(0, 8)}…</td>
++                                        <td class="text-mono">${u.cpt_code ?? "—"}</td>
++                                        <td class="text-mono">${u.billed_amount != null ? fmt(u.billed_amount) : "—"}</td>
++                                    </tr>`).join("")}
++                            </tbody>
++                        </table>
++                    </div>
++                </div>` : ""}
+                 ${claim.dispute.reviewer_note ? `
+                 <div style="margin-top:10px">
+                     <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">REVIEWER NOTE</div>
+@@ -228,10 +269,26 @@ function renderActionSections(claim) {
+             const reason = document.getElementById("dispute-reason").value.trim();
+             const errEl  = document.getElementById("dispute-error");
+             if (!reason) { showError(errEl, "Reason is required."); return; }
++
++            const liIds = [...new Set(
++                [...document.querySelectorAll("[data-li-id]")].map(el => el.dataset.liId)
++            )];
++            const lineItemUpdates = [];
++            for (const liId of liIds) {
++                const cptVal    = document.querySelector(`.li-cpt-input[data-li-id="${liId}"]`).value.trim();
++                const amountVal = document.querySelector(`.li-amount-input[data-li-id="${liId}"]`).value.trim();
++                if (cptVal || amountVal) {
++                    const entry = { line_item_id: liId };
++                    if (cptVal) entry.cpt_code = cptVal;
++                    if (amountVal) entry.billed_amount = amountVal;
++                    lineItemUpdates.push(entry);
++                }
++            }
++
+             disputeBtn.disabled = true;
+             disputeBtn.textContent = "Submitting…";
+             try {
+-                await api.submitDispute(claim.id, reason);
++                await api.submitDispute(claim.id, reason, lineItemUpdates.length ? lineItemUpdates : null);
+                 loadClaim();
+             } catch (err) {
+                 showError(errEl, err.message);
+diff --git a/tests/integration/test_disputes_api.py b/tests/integration/test_disputes_api.py
+index e004942..e11846d 100644
+--- a/tests/integration/test_disputes_api.py
++++ b/tests/integration/test_disputes_api.py
+@@ -359,3 +359,163 @@ class TestListDisputedClaims:
+         resp = client.get("/api/claims?disputed=true")
+         assert resp.status_code == 200
+         assert resp.get_json() == []
++
++
++# ---------------------------------------------------------------------------
++# POST /api/claims/<id>/disputes — line item corrections
++# ---------------------------------------------------------------------------
++
++
++class TestSubmitDisputeWithLineItemUpdatesAPI:
++    """POST /api/claims/<id>/disputes with line_item_updates."""
++
++    def test_line_item_updates_applied_and_visible_in_claim(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """Corrections are applied to the line item and returned in the claim detail."""
++        claim_id = _submit_denied_claim(client, seed)
++        claim_data = client.get(f"/api/claims/{claim_id}").get_json()
++        li_id = claim_data["line_items"][0]["id"]
++
++        resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={
++                "reason": "Wrong CPT code.",
++                "line_item_updates": [{"line_item_id": li_id, "cpt_code": "99213"}],
++            },
++        )
++        assert resp.status_code == 201
++
++        updated_claim = client.get(f"/api/claims/{claim_id}").get_json()
++        assert updated_claim["line_items"][0]["cpt_code"] == "99213"
++
++    def test_line_item_updates_stored_on_dispute(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """The submitted line_item_updates are returned in the dispute resource."""
++        claim_id = _submit_denied_claim(client, seed)
++        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
++        updates = [{"line_item_id": li_id, "billed_amount": "180.00"}]
++
++        client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={"reason": "Amount wrong.", "line_item_updates": updates},
++        )
++
++        dispute_data = client.get(f"/api/claims/{claim_id}/dispute").get_json()
++        assert dispute_data["line_item_updates"] == updates
++
++    def test_unknown_line_item_id_returns_400(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """An unknown line_item_id returns 400."""
++        claim_id = _submit_denied_claim(client, seed)
++        resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={
++                "reason": "Bad ID.",
++                "line_item_updates": [
++                    {
++                        "line_item_id": "00000000-0000-0000-0000-000000000000",
++                        "cpt_code": "99213",
++                    }
++                ],
++            },
++        )
++        assert resp.status_code == 400
++
++    def test_zero_billed_amount_returns_400(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """A billed_amount of zero returns 400."""
++        claim_id = _submit_denied_claim(client, seed)
++        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
++        resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={
++                "reason": "Amount.",
++                "line_item_updates": [{"line_item_id": li_id, "billed_amount": "0.00"}],
++            },
++        )
++        assert resp.status_code == 400
++
++    def test_negative_billed_amount_returns_400(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """A negative billed_amount returns 400."""
++        claim_id = _submit_denied_claim(client, seed)
++        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
++        resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={
++                "reason": "Amount.",
++                "line_item_updates": [{"line_item_id": li_id, "billed_amount": "-10.00"}],
++            },
++        )
++        assert resp.status_code == 400
++
++    def test_empty_cpt_code_returns_400(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """An empty cpt_code returns 400."""
++        claim_id = _submit_denied_claim(client, seed)
++        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
++        resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={
++                "reason": "CPT.",
++                "line_item_updates": [{"line_item_id": li_id, "cpt_code": ""}],
++            },
++        )
++        assert resp.status_code == 400
++
++    def test_no_line_item_updates_still_works(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """Submitting without line_item_updates is backward-compatible and returns 201."""
++        claim_id = _submit_denied_claim(client, seed)
++        resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={"reason": "No corrections needed."},
++        )
++        assert resp.status_code == 201
++        assert resp.get_json()["line_item_updates"] is None
++
++    def test_cpt_correction_auto_adjudicates_to_paid(
++        self, client: FlaskClient, seed: types.SimpleNamespace
++    ) -> None:
++        """Full flow: denied claim with corrected CPT → auto-adjudicates to paid at submission."""
++        # Use a large billed amount to exceed the $500 deductible so plan pays something
++        resp = client.post(
++            "/api/claims",
++            json={
++                "member_id": seed.member.id,
++                "provider_id": seed.provider.id,
++                "date_of_service": "2026-03-01",
++                "line_items": [
++                    {"diagnosis_code": "M54.5", "cpt_code": "00000", "billed_amount": "700.00"}
++                ],
++            },
++        )
++        assert resp.status_code == 201
++        claim_id = resp.get_json()["id"]
++        assert resp.get_json()["status"] == "denied"
++
++        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
++
++        dispute_resp = client.post(
++            f"/api/claims/{claim_id}/disputes",
++            json={
++                "reason": "Correct CPT should be 99213.",
++                "line_item_updates": [{"line_item_id": li_id, "cpt_code": "99213"}],
++            },
++        )
++        assert dispute_resp.status_code == 201
++
++        # Claim should already be paid — no manual adjudication step needed.
++        claim_data = client.get(f"/api/claims/{claim_id}").get_json()
++        assert claim_data["status"] == "paid"
++
++        # Manually triggering adjudication on an auto-resolved claim returns 409.
++        adj_resp = client.post(f"/api/claims/{claim_id}/adjudicate", json={})
++        assert adj_resp.status_code == 409
+diff --git a/tests/unit/test_dispute_service.py b/tests/unit/test_dispute_service.py
+index f6b7e50..6ca195c 100644
+--- a/tests/unit/test_dispute_service.py
++++ b/tests/unit/test_dispute_service.py
+@@ -13,7 +13,7 @@ from decimal import Decimal
+ import pytest
+ from flask import Flask
+ 
+-from app.errors import ConflictError, NotFoundError
++from app.errors import BadRequestError, ConflictError, NotFoundError
+ from app.extensions import db
+ from app.models import (
+     Claim,
+@@ -204,3 +204,362 @@ class TestAcceptPaymentGuards:
+ 
+         with pytest.raises(ConflictError):
+             accept_payment(claim.id)
++
++
++# ---------------------------------------------------------------------------
++# submit_dispute with line item corrections
++# ---------------------------------------------------------------------------
++
++
++class TestSubmitDisputeWithLineItemUpdates:
++    """Tests for the optional line_item_updates parameter in submit_dispute."""
++
++    def test_billed_amount_correction_applied(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """Providing a corrected billed_amount updates the LineItem in-place."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Amount was wrong.",
++            line_item_updates=[{"line_item_id": li.id, "billed_amount": "150.00"}],
++        )
++
++        db.session.refresh(li)
++        assert li.billed_amount == Decimal("150.00")
++
++    def test_cpt_code_correction_applied(self, app: Flask, seed: types.SimpleNamespace) -> None:
++        """Providing a corrected cpt_code updates the LineItem in-place."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Wrong CPT code.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        db.session.refresh(li)
++        assert li.cpt_code == "99213"
++
++    def test_both_fields_corrected_on_same_line_item(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """Both billed_amount and cpt_code can be corrected on the same line item."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Both fields wrong.",
++            line_item_updates=[
++                {"line_item_id": li.id, "cpt_code": "99213", "billed_amount": "175.00"}
++            ],
++        )
++
++        db.session.refresh(li)
++        assert li.cpt_code == "99213"
++        assert li.billed_amount == Decimal("175.00")
++
++    def test_multiple_line_items_corrected_independently(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """Corrections to multiple line items are each applied independently."""
++        claim = _make_claim(
++            seed,
++            [
++                ("M54.5", "00000", Decimal("200.00")),
++                ("M54.5", "00001", Decimal("300.00")),
++            ],
++        )
++        AdjudicationEngine().run(claim.id)  # → denied
++        li0, li1 = claim.line_items[0], claim.line_items[1]
++
++        submit_dispute(
++            claim.id,
++            reason="Both items wrong.",
++            line_item_updates=[
++                {"line_item_id": li0.id, "cpt_code": "99213"},
++                {"line_item_id": li1.id, "billed_amount": "250.00"},
++            ],
++        )
++
++        db.session.refresh(li0)
++        db.session.refresh(li1)
++        assert li0.cpt_code == "99213"
++        assert li1.billed_amount == Decimal("250.00")
++
++    def test_only_provided_field_is_updated(self, app: Flask, seed: types.SimpleNamespace) -> None:
++        """Providing only billed_amount leaves cpt_code unchanged, and vice versa."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++        original_cpt = li.cpt_code
++
++        submit_dispute(
++            claim.id,
++            reason="Amount only.",
++            line_item_updates=[{"line_item_id": li.id, "billed_amount": "100.00"}],
++        )
++
++        db.session.refresh(li)
++        assert li.cpt_code == original_cpt
++        assert li.billed_amount == Decimal("100.00")
++
++    def test_unknown_line_item_id_raises_bad_request(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """A line_item_id not belonging to the claim raises BadRequestError."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++
++        with pytest.raises(BadRequestError):
++            submit_dispute(
++                claim.id,
++                reason="Wrong item.",
++                line_item_updates=[
++                    {"line_item_id": "00000000-0000-0000-0000-000000000000", "cpt_code": "99213"}
++                ],
++            )
++
++    def test_zero_billed_amount_raises_bad_request(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """A billed_amount of zero raises BadRequestError."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        with pytest.raises(BadRequestError):
++            submit_dispute(
++                claim.id,
++                reason="Amount.",
++                line_item_updates=[{"line_item_id": li.id, "billed_amount": "0.00"}],
++            )
++
++    def test_negative_billed_amount_raises_bad_request(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """A negative billed_amount raises BadRequestError."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        with pytest.raises(BadRequestError):
++            submit_dispute(
++                claim.id,
++                reason="Amount.",
++                line_item_updates=[{"line_item_id": li.id, "billed_amount": "-50.00"}],
++            )
++
++    def test_empty_cpt_code_raises_bad_request(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """An empty cpt_code raises BadRequestError."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        with pytest.raises(BadRequestError):
++            submit_dispute(
++                claim.id,
++                reason="CPT.",
++                line_item_updates=[{"line_item_id": li.id, "cpt_code": ""}],
++            )
++
++    def test_whitespace_only_cpt_code_raises_bad_request(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """A whitespace-only cpt_code raises BadRequestError after stripping."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        with pytest.raises(BadRequestError):
++            submit_dispute(
++                claim.id,
++                reason="CPT.",
++                line_item_updates=[{"line_item_id": li.id, "cpt_code": "   "}],
++            )
++
++    def test_none_updates_behaves_as_before(self, app: Flask, seed: types.SimpleNamespace) -> None:
++        """Passing line_item_updates=None creates a dispute with no mutations."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++        original_cpt = li.cpt_code
++        original_amount = li.billed_amount
++
++        dispute = submit_dispute(claim.id, reason="No corrections.", line_item_updates=None)
++
++        db.session.refresh(li)
++        assert dispute.line_item_updates is None
++        assert li.cpt_code == original_cpt
++        assert li.billed_amount == original_amount
++
++    def test_empty_list_behaves_as_before(self, app: Flask, seed: types.SimpleNamespace) -> None:
++        """Passing an empty list creates a dispute with no mutations."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++        original_amount = li.billed_amount
++
++        dispute = submit_dispute(claim.id, reason="Empty list.", line_item_updates=[])
++
++        db.session.refresh(li)
++        assert dispute.line_item_updates is None
++        assert li.billed_amount == original_amount
++
++    def test_updates_stored_on_dispute(self, app: Flask, seed: types.SimpleNamespace) -> None:
++        """The raw line_item_updates are stored on the Dispute row."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++        updates = [{"line_item_id": li.id, "cpt_code": "99213"}]
++
++        dispute = submit_dispute(claim.id, reason="Stored.", line_item_updates=updates)
++
++        assert dispute.line_item_updates == updates
++
++    def test_cpt_correction_auto_adjudicates_to_paid(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """Correcting CPT to a covered code auto-adjudicates to paid at dispute submission."""
++        # Burn through deductible so plan_pays > 0 after correction
++        claim = _make_claim(
++            seed,
++            [("M54.5", "00000", Decimal("700.00"))],
++            deductible_met=Decimal("500.00"),
++        )
++        AdjudicationEngine().run(claim.id)  # → denied (00000 not covered)
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Wrong CPT, should be 99213.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        # No manual trigger_readjudication needed — auto-adjudicated at submission.
++        db.session.refresh(claim)
++        assert claim.status == ClaimStatus.paid
++
++    def test_dispute_with_corrections_not_under_review(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """After submitting a dispute with corrections, claim is not stuck at under_review."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Wrong CPT.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        db.session.refresh(claim)
++        assert claim.status != ClaimStatus.under_review
++
++    def test_dispute_with_corrections_resolves_dispute(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """Dispute submitted with corrections is immediately resolved (no pending review)."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        dispute = submit_dispute(
++            claim.id,
++            reason="Wrong CPT.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        assert dispute.status == DisputeStatus.resolved
++        assert dispute.resolved_at is not None
++
++    def test_dispute_with_corrections_sets_review_type_auto(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """Claim review_type is auto when corrections are provided."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Wrong CPT.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        db.session.refresh(claim)
++        assert claim.review_type == ReviewType.auto
++
++    def test_trigger_readjudication_fails_after_auto_adjudication(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """trigger_readjudication raises ConflictError after auto-adjudicated dispute."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("200.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Wrong CPT.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        with pytest.raises(ConflictError):
++            trigger_readjudication(claim.id, reviewer_note=None)
++
++    def test_only_cpt_update_uses_existing_amount_in_adjudication(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """When only cpt_code is corrected, the existing billed_amount drives adjudication."""
++        claim = _make_claim(
++            seed,
++            [("M54.5", "00000", Decimal("300.00"))],
++            deductible_met=Decimal("500.00"),
++        )
++        AdjudicationEngine().run(claim.id)  # → denied
++        li = claim.line_items[0]
++
++        submit_dispute(
++            claim.id,
++            reason="Wrong CPT, amount is correct.",
++            line_item_updates=[{"line_item_id": li.id, "cpt_code": "99213"}],
++        )
++
++        db.session.refresh(li)
++        assert li.cpt_code == "99213"
++        assert li.billed_amount == Decimal("300.00")  # unchanged
++        # adjudication result should use 300.00 as billed_amount
++        assert li.latest_result is not None
++        assert li.latest_result.is_covered is True
++
++    def test_only_amount_update_uses_existing_cpt_in_adjudication(
++        self, app: Flask, seed: types.SimpleNamespace
++    ) -> None:
++        """When only billed_amount is corrected, the existing cpt_code drives adjudication."""
++        claim = _make_claim(seed, [("M54.5", "00000", Decimal("100.00"))])
++        AdjudicationEngine().run(claim.id)  # → denied (00000 not covered)
++        li = claim.line_items[0]
++        original_cpt = li.cpt_code
++
++        submit_dispute(
++            claim.id,
++            reason="Amount was wrong.",
++            line_item_updates=[{"line_item_id": li.id, "billed_amount": "150.00"}],
++        )
++
++        db.session.refresh(li)
++        assert li.cpt_code == original_cpt  # unchanged
++        assert li.billed_amount == Decimal("150.00")
++        # 00000 is still not covered, so still denied
++        db.session.refresh(claim)
++        assert claim.status == ClaimStatus.denied
+On branch master
+Your branch is up to date with 'origin/master'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   app/models.py
+	modified:   app/routes/claims.py
+	modified:   app/services/dispute_service.py
+	modified:   app/static/js/admin.js
+	modified:   app/static/js/api.js
+	modified:   app/static/js/claim-detail.js
+	modified:   tests/integration/test_disputes_api.py
+	modified:   tests/unit/test_dispute_service.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	migrations/versions/b2c3d4e5f6a7_add_line_item_updates_to_disputes.py
+
+no changes added to commit (use "git add" and/or "git commit -a")

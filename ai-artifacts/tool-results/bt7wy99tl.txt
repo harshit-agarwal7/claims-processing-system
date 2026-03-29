@@ -1,0 +1,674 @@
+On branch master
+Your branch is ahead of 'origin/master' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add/rm <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   CLAUDE.md
+	deleted:    docs/acceptance_criteria.md
+	deleted:    docs/data_model.md
+	deleted:    docs/domain_concepts.md
+	deleted:    docs/domain_model_review_skill.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	docs/acceptance-criteria.md
+	docs/domain-concepts.md
+	docs/domain-model-review-skill.md
+	docs/domain-model.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+diff --git a/CLAUDE.md b/CLAUDE.md
+index ee8e8ce..24c0b1d 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -6,9 +6,9 @@ Members submit claims for reimbursement. The system must determine what's covere
+ 
+ ---
+ 
+-See [docs/domain_concepts.md](docs/domain_concepts.md) for the full domain model and vocabulary.
++See [docs/domain-concepts.md](docs/domain-concepts.md) for the full domain model and vocabulary.
+ 
+-See [docs/acceptance_criteria.md](docs/acceptance_criteria.md) for acceptance criteria and scope boundaries.
++See [docs/acceptance-criteria.md](docs/acceptance-criteria.md) for acceptance criteria and scope boundaries.
+ 
+ ---
+ 
+diff --git a/docs/acceptance_criteria.md b/docs/acceptance_criteria.md
+deleted file mode 100644
+index 4aa245a..0000000
+--- a/docs/acceptance_criteria.md
++++ /dev/null
+@@ -1,89 +0,0 @@
+-# Claims Processing System — Acceptance Criteria
+-
+-## 0. Scope
+-
+-**In scope:**
+-- Individual plans only — no family or group plans
+-- Each member has exactly one active policy at a time
+-- Each member has exactly one insurance (no secondary insurance)
+-- Line items adjudicate against the **billed amount**; deductible and coinsurance are calculated against the billed amount
+-- Adjudication result records what the plan pays and what the member owes — this single record serves all purposes (no distinction between member-facing and provider-facing documents)
+-
+-**Out of scope:**
+-- Riders / policy add-ons
+-- Family or shared deductibles / accumulators
+-- Coordination of Benefits (COB) / secondary insurance
+-- Distinction between billed amount and contracted/allowed amount
+-- Distinction between member-facing EOB and provider-facing remittance advice
+-
+----
+-
+-## 1. Claim Submission
+-- A member can submit a claim with one or more line items
+-- Each line item includes: diagnosis code (ICD-10), procedure code (CPT), and billed amount; provider details are on the claim
+-- Submission returns a unique claim ID and initial status of `submitted`
+-- Invalid submissions (missing required fields, unknown member/policy) are rejected with clear error messages
+-
+-## 2. Coverage Adjudication
+-- Adjudication happens at the **line item level** — each line item is evaluated independently
+-- For each line item, the system determines:
+-  - Whether the service type is covered under the member's active policy
+-  - The payable amount after applying the remaining deductible and coverage percentage
+-  - An explanation referencing the specific rule applied (e.g., *"Service covered at 80%; $200 applied to deductible. Payable: $160"*)
+-- Deductible consumption is tracked **across all prior claims** in the same policy period
+-- Adjudication results are stored and retrievable per claim
+-
+-## 3. Claim Lifecycle
+-- Claims transition through states in this order:
+-
+-  ```
+-  submitted → under_review → approved
+-                           → denied
+-                           → partially_approved → paid
+-                                    ↓
+-                                   paid
+-  ```
+-
+-- The claim-level state is derived from line item outcomes:
+-  - All line items approved → `approved`
+-  - All line items denied → `denied`
+-  - Mix of approved and denied → `partially_approved`
+-- No state can be skipped; transitions are timestamped and auditable
+-- The paid amount is the **sum of approved line items only**
+-
+-## 4. Decision Transparency
+-- Every line item adjudication has a human-readable explanation
+-- The explanation references the policy rule applied and shows the deductible/coverage calculation
+-- A member can retrieve the full decision rationale for any of their claims
+-
+-## 5. Disputes
+-- A member can dispute a `denied` or `partially_approved` claim
+-- Disputing moves the claim back to `under_review`
+-- The dispute records the member's reason
+-- After re-adjudication, the claim reaches a new final state (`approved`, `denied`, or `partially_approved`)
+-- A claim can only be disputed once (no infinite dispute loops)
+-
+-## 6. Policy & Coverage Rules
+-- A policy defines: covered service types, coverage percentage, deductible amount, and policy period (start/end dates)
+-- A member can only submit a claim against a policy that was **active at the time of service**
+-- The deductible is applied first; the coverage percentage applies only to the amount exceeding the deductible
+-- Once the deductible is fully consumed across claims in the policy period, subsequent claims are paid at the coverage percentage with no further deductible applied
+-
+-## 7. API Correctness
+-- All endpoints return appropriate HTTP status codes (200, 201, 400, 404, 422, 500)
+-- Error responses include a machine-readable error code and human-readable message
+-- All responses are valid JSON
+-
+-## 8. Data Integrity
+-- A member cannot submit a claim against a policy they do not hold
+-- Monetary amounts are stored and returned to 2 decimal places
+-- Concurrent claim submissions do not corrupt deductible tracking
+-
+-## 9. Observability
+-- All state transitions logged at `INFO` level with claim ID and timestamp
+-- All adjudication decisions logged with claim ID, line item, rule applied, and outcome
+-- Errors logged at `ERROR` level with enough context to reproduce the issue
+-
+-## 10. Non-Functional
+-- All API responses complete within 2 seconds under normal load
+-- Test coverage for: adjudication logic, deductible tracking, state machine transitions, and API endpoints
+diff --git a/docs/data_model.md b/docs/data_model.md
+deleted file mode 100644
+index 9c2b0aa..0000000
+--- a/docs/data_model.md
++++ /dev/null
+@@ -1,321 +0,0 @@
+-# Claims Processing System — Data Model
+-
+----
+-
+-## Domain Entities
+-
+-### Member
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `name` | str | |
+-| `date_of_birth` | date | |
+-| `email` | str | unique |
+-| `phone` | str | nullable |
+-| `created_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+----
+-
+-### Provider
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `name` | str | individual or facility |
+-| `npi` | str | National Provider Identifier, unique |
+-| `provider_type` | enum | `individual`, `facility` |
+-| `created_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+----
+-
+-### Plan
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `name` | str | |
+-| `deductible` | Decimal(10,2) | fixed per-period amount |
+-| `created_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-Plan is a **template** — no member-specific data lives here. When a plan changes (e.g. yearly update), a new `Plan` row is created; existing policies remain tied to the original plan.
+-
+----
+-
+-### CoverageRule
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `plan_id` | FK → Plan | |
+-| `cpt_code` | str | e.g. `99213` |
+-| `is_covered` | bool | |
+-| `coverage_percentage` | Decimal(5,4) | 0.0–1.0; e.g. `0.8000` |
+-| `created_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-**Unique constraint:** `(plan_id, cpt_code)`. A CPT code absent from this table → denied (not covered).
+-
+----
+-
+-### Policy
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `member_id` | FK → Member | |
+-| `plan_id` | FK → Plan | |
+-| `start_date` | date | |
+-| `end_date` | date | |
+-| `status` | enum | `active`, `expired`, `cancelled` |
+-| `created_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-**Constraint:** A member may have only one `active` policy at a time (partial unique index on `member_id` where `status = active`).
+-
+----
+-
+-### Accumulator
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `member_id` | FK → Member | intentionally denormalized from `Policy.member_id`; see Design Note §6 |
+-| `policy_id` | FK → Policy | defines the period |
+-| `deductible_met` | Decimal(10,2) | running total, starts at `0.00` |
+-| `created_at` | datetime | |
+-| `updated_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-**Unique constraint:** `(member_id, policy_id)`. Resets (new row) when policy period changes.
+-
+----
+-
+-### Claim
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `member_id` | FK → Member | |
+-| `policy_id` | FK → Policy | policy active at date_of_service |
+-| `provider_id` | FK → Provider | |
+-| `date_of_service` | date | must fall within policy period; enforced at application layer |
+-| `status` | enum | see state machine below; stored, written only by adjudication engine and dispute handler |
+-| `review_type` | enum | `auto` (initial), `manual` (post-dispute) |
+-| `submitted_at` | datetime | |
+-| `updated_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-The one-dispute rule is enforced by checking whether a `Dispute` row exists for the claim, not by a counter on `Claim`.
+-
+----
+-
+-### ClaimStatusHistory
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `claim_id` | FK → Claim | |
+-| `from_status` | enum | nullable for initial `submitted` |
+-| `to_status` | enum | |
+-| `transitioned_at` | datetime | |
+-| `note` | str | optional, e.g. "dispute submitted" |
+-
+-Append-only. Never mutated — provides full audit trail per AC §3. No soft delete.
+-
+----
+-
+-### LineItem
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `claim_id` | FK → Claim | |
+-| `diagnosis_code` | str | ICD-10, e.g. `M54.5` |
+-| `cpt_code` | str | CPT, e.g. `99213` |
+-| `billed_amount` | Decimal(10,2) | provider's charge; adjudication basis |
+-| `adjudication_status` | enum | `pending`, `approved`, `denied` |
+-| `latest_result_id` | FK → AdjudicationResult | nullable; updated atomically on each new adjudication; see Design Note §3 |
+-| `updated_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-On re-adjudication after a dispute, `adjudication_status` is reset to `pending` and `latest_result_id` is cleared before the rules engine runs again.
+-
+----
+-
+-### AdjudicationResult
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `line_item_id` | FK → LineItem | |
+-| `revision` | int | starts at 1; increments on re-adjudication |
+-| `is_covered` | bool | |
+-| `applied_to_deductible` | Decimal(10,2) | portion of billed amount applied toward deductible |
+-| `plan_pays` | Decimal(10,2) | |
+-| `member_owes` | Decimal(10,2) | |
+-| `explanation` | text | human-readable, references rule applied |
+-| `adjudicated_at` | datetime | |
+-
+-**Unique constraint:** `(line_item_id, revision)`. Re-adjudication appends a new row; original results are never mutated. Append-only. No soft delete.
+-
+----
+-
+-### Dispute
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `claim_id` | FK → Claim | **one-to-one** (at most one per claim) |
+-| `reason` | text | member's stated reason |
+-| `reviewer_note` | text | nullable; human reviewer's findings/decision |
+-| `submitted_at` | datetime | |
+-| `resolved_at` | datetime | nullable; set when `status` transitions to `resolved` |
+-| `status` | enum | `pending`, `resolved` |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+----
+-
+-### Payment
+-| Attribute | Type | Notes |
+-|---|---|---|
+-| `id` | UUID | PK |
+-| `claim_id` | FK → Claim | **one-to-one** |
+-| `amount` | Decimal(10,2) | sum of `plan_pays` across approved line items |
+-| `paid_at` | datetime | |
+-| `deleted_at` | datetime | nullable; soft delete |
+-
+-Created automatically at the end of the adjudication transaction when claim status resolves to `approved`. For `partially_approved` claims, created when the claim is explicitly accepted or when re-adjudication after a dispute completes and no further dispute is possible.
+-
+----
+-
+-## Relationships
+-
+-```
+-Member ──< Policy >── Plan
+-                 │
+-                 └──< CoverageRule (cpt_code, coverage_percentage)
+-
+-Member ──< Accumulator (one per policy period)
+-Policy ──< Accumulator
+-
+-Member ──< Claim >── Policy
+-                     Claim >── Provider
+-                     Claim ──< LineItem ──< AdjudicationResult (revision-based)
+-                                LineItem ──── AdjudicationResult (latest_result_id, 0..1)
+-                     Claim ──< ClaimStatusHistory
+-                     Claim ──── Dispute (0..1)
+-                     Claim ──── Payment (0..1)
+-```
+-
+-Key cardinalities:
+-
+-| Relationship | Cardinality |
+-|---|---|
+-| Member → Policies | 1 : N (one active at a time) |
+-| Plan → Policies | 1 : N |
+-| Plan → CoverageRules | 1 : N |
+-| Policy → Accumulator | 1 : 1 (per period) |
+-| Member → Claims | 1 : N |
+-| Claim → LineItems | 1 : N (at least 1) |
+-| LineItem → AdjudicationResults | 1 : N (revision-based; `latest_result_id` points to current) |
+-| Claim → ClaimStatusHistory | 1 : N |
+-| Claim → Dispute | 1 : 0..1 |
+-| Claim → Payment | 1 : 0..1 |
+-
+----
+-
+-## State Machines
+-
+-### Claim Status
+-
+-```
+-                   ┌──────────────────────────────────────────┐
+-                   │ [dispute, no existing Dispute]            │
+-                   ▼                                           │
+-submitted ──► under_review ──► approved ──► paid (auto)       │
+-                   │                                           │
+-                   ├──► denied ──────────────────────────────►┤
+-                   │                                           │
+-                   └──► partially_approved ──► paid ───────────┘
+-                              │ [dispute, no existing Dispute]
+-                              └──► under_review
+-```
+-
+-| From | To | Trigger | Guard |
+-|---|---|---|---|
+-| `submitted` | `under_review` | adjudication begins (`review_type=auto`) | — |
+-| `under_review` | `approved` | adjudication complete | all line items `approved` |
+-| `under_review` | `denied` | adjudication complete | all line items `denied` |
+-| `under_review` | `partially_approved` | adjudication complete | mixed `approved`/`denied` |
+-| `approved` | `paid` | adjudication complete (automatic) | all line items `approved` |
+-| `partially_approved` | `paid` | payment accepted | no existing `Dispute`, or re-adjudication complete with no further dispute possible |
+-| `denied` | `under_review` | dispute submitted (`review_type=manual`) | no existing `Dispute` |
+-| `partially_approved` | `under_review` | dispute submitted (`review_type=manual`) | no existing `Dispute` |
+-
+-**Terminal states:** `paid` (normal path), `denied` when no `Dispute` exists and re-adjudication is complete.
+-
+-**`approved → paid` is automatic:** When adjudication completes and all line items are `approved`, the claim transitions to `paid` and a `Payment` record is created within the same DB transaction. No separate trigger is needed.
+-
+-**`partially_approved → paid`:** Not automatic. The member may dispute (moves to `under_review`) or the claim transitions to `paid` once no further dispute is possible (i.e. a `Dispute` record exists and has been resolved).
+-
+-**`Claim.status` is a stored column**, updated by the adjudication engine and dispute handler only, never directly by API callers. It is derived from `LineItem.adjudication_status` values at the end of each adjudication run and persisted within the same transaction.
+-
+-**`review_type` distinction:** When `review_type=auto` the system adjudicates immediately on entering `under_review`. When `review_type=manual` (post-dispute) the claim waits for a human reviewer to check coverage rule configuration before re-adjudication is triggered.
+-
+----
+-
+-### LineItem Adjudication Status
+-
+-```
+-pending ──► approved ──► pending  [trigger: dispute re-adjudication]
+-        └──► denied  ──► pending  [trigger: dispute re-adjudication]
+-```
+-
+-| From | To | Trigger |
+-|---|---|---|
+-| `pending` | `approved` | CPT code covered + `date_of_service` within policy period |
+-| `pending` | `denied` | CPT code absent/not covered, or service outside policy period |
+-| `approved` | `pending` | dispute re-adjudication begins |
+-| `denied` | `pending` | dispute re-adjudication begins |
+-
+-On re-adjudication after a dispute, `adjudication_status` is reset to `pending`, `latest_result_id` is cleared, and a new `AdjudicationResult` row (next revision) is created when the engine runs.
+-
+----
+-
+-### Policy Status
+-
+-```
+-active ──► expired
+-       └──► cancelled
+-```
+-
+-| From | To | Trigger |
+-|---|---|---|
+-| `active` | `expired` | `end_date < today` (time-based) |
+-| `active` | `cancelled` | manual admin action |
+-
+-Both `expired` and `cancelled` are terminal.
+-
+----
+-
+-## Design Notes
+-
+-1. **Adjudication transaction boundary** (AC §8): The following writes must occur in a single DB transaction to guarantee consistency and prevent deductible double-spend under concurrent submissions:
+-   - UPDATE `LineItem.adjudication_status` (× N line items)
+-   - INSERT `AdjudicationResult` (× N)
+-   - UPDATE `LineItem.latest_result_id` (× N)
+-   - UPDATE `Accumulator.deductible_met`
+-   - UPDATE `Claim.status`
+-   - INSERT `ClaimStatusHistory`
+-   - INSERT `Payment` (only when result is `approved`)
+-
+-2. **`Claim.status` is stored, not derived**: The status column is written exclusively by the adjudication engine and dispute handler within the adjudication transaction (see Note §1). It must never be written directly by API endpoint handlers. This is enforced by code convention, not a DB constraint.
+-
+-3. **`latest_result_id` on `LineItem`**: Points to the most recent `AdjudicationResult` row for that line item. Updated atomically during each adjudication transaction. Allows loading a claim with all current adjudication results via a single join, avoiding a correlated subquery per line item.
+-
+-4. **Dispute re-adjudication**: Re-adjudication appends new `AdjudicationResult` rows (incrementing `revision`) rather than mutating existing ones. `LineItem.latest_result_id` is updated to the new row. Original decisions are preserved for audit.
+-
+-5. **Monetary precision**: Store all amounts as `NUMERIC(10, 2)` in SQLite (mapped to `Decimal` in Python). Never use `float`.
+-
+-6. **`Accumulator.member_id` denormalization**: `member_id` is carried on `Accumulator` even though it is derivable via `Policy`. This allows direct member-scoped accumulator queries without a join and is intentional.
+-
+-7. **`date_of_service` validation**: The constraint that `date_of_service` must fall within `[policy.start_date, policy.end_date]` is enforced at the application layer (claim submission validation). SQLite does not support cross-table check constraints without triggers.
+-
+-8. **State transition enforcement**: State transition sequencing and the one-dispute rule are enforced by the application service layer, not by DB constraints. `ClaimStatusHistory` provides the immutable audit trail.
+-
+-9. **Soft delete**: All primary entities carry `deleted_at DATETIME nullable`. A `NULL` value means the record is active. Application queries must filter `WHERE deleted_at IS NULL` by default. `ClaimStatusHistory` and `AdjudicationResult` are append-only audit tables and do not carry `deleted_at`.
+-
+-10. **UUID storage**: All UUIDs are stored as `TEXT(36)` in SQLite, mapped to `String(36)` in SQLAlchemy with `default=uuid.uuid4`.
+diff --git a/docs/domain_concepts.md b/docs/domain_concepts.md
+deleted file mode 100644
+index be910af..0000000
+--- a/docs/domain_concepts.md
++++ /dev/null
+@@ -1,121 +0,0 @@
+-# Claims Processing System — Domain Concepts
+-
+-This document defines the core vocabulary and conceptual model for the system.
+-Behavioral requirements are in [acceptance_criteria.md](acceptance_criteria.md).
+-
+----
+-
+-## Entities
+-
+-### Member
+-An individual insured person. Has exactly one active policy at a time and exactly one insurance (no secondary coverage).
+-
+-### Provider
+-A healthcare professional or facility that delivers services to a member.
+-
+-### Plan
+-Defines the benefit structure: which CPT codes are covered, the coverage percentage per CPT code, and the deductible amount. A plan is a template — multiple members can be on the same plan.
+-
+-### Policy
+-A specific member's instance of a plan. Has a defined **policy period** (start and end dates). Coverage is only valid for services rendered within the policy period.
+-
+-### Claim
+-A request for reimbursement submitted by (or on behalf of) a member. Contains one or more **line items**, plus provider details and the date of service.
+-
+-### Line Item
+-A single billable service within a claim. Each line item has:
+-- A **diagnosis code** (ICD-10) — why the service was needed
+-- A **procedure code** (CPT) — what service was performed
+-- A **billed amount** — what the provider charged; this is also the amount adjudication is calculated against
+-
+-### Adjudication Result
+-The outcome of evaluating a line item against the member's policy. Records:
+-- Whether the service is covered
+-- The amount applied to the deductible
+-- The amount the plan pays
+-- The amount the member owes
+-- A human-readable explanation of the decision
+-
+-### Accumulator
+-A running total tracked per member, per policy period. Resets when a new policy period begins. The system tracks:
+-- **Deductible met** — how much the member has paid toward their deductible so far this period
+-
+-Accumulators are updated after each adjudication and are an input to subsequent ones.
+-
+----
+-
+-## Coverage Rules
+-
+-Coverage is defined at the **CPT code level**. Each CPT code on a plan has:
+-- Whether it is covered (yes/no)
+-- A **coverage percentage** — the share the plan pays after the deductible is met
+-
+-If a CPT code has no rule defined on the plan, the line item is denied as not covered.
+-
+----
+-
+-## Key Financial Concepts
+-
+-### Billed Amount
+-What the provider charges for a service. This is the amount used as the basis for adjudication.
+-
+-### Deductible
+-A fixed amount the member must pay out-of-pocket before the plan begins paying. Applied per line item against the billed amount. Tracked cumulatively across all claims in the policy period.
+-
+-### Coinsurance
+-Once the deductible is met, the member pays a fixed percentage and the plan pays the remainder, as defined by the CPT code's coverage rule.
+-
+-### Adjudication Math (per line item)
+-```
+-remaining_deductible  = deductible - deductible_met_so_far
+-applied_to_deductible = min(billed_amount, remaining_deductible)
+-amount_after_deductible = billed_amount - applied_to_deductible
+-plan_pays    = amount_after_deductible * coverage_percentage
+-member_owes  = applied_to_deductible + (amount_after_deductible * (1 - coverage_percentage))
+-```
+-
+----
+-
+-## Codes
+-
+-| Code Type | Standard | Purpose | Example |
+-|-----------|----------|---------|---------|
+-| Diagnosis | ICD-10 | Why the service was needed | `M54.5` (lower back pain) |
+-| Procedure | CPT | What service was performed | `99213` (office visit) |
+-
+----
+-
+-## Claim Lifecycle
+-
+-```
+-submitted → under_review → approved          → paid
+-                         → denied
+-                         → partially_approved → paid
+-```
+-
+-- **submitted** — received, not yet evaluated
+-- **under_review** — adjudication in progress, or a dispute is being reviewed
+-- **approved** — all line items covered
+-- **denied** — all line items not covered
+-- **partially_approved** — mix of covered and not covered line items
+-- **paid** — plan payment has been issued
+-
+-The claim-level state is always derived from line item outcomes, never set directly.
+-
+----
+-
+-## Disputes
+-
+-A member may dispute a `denied` or `partially_approved` claim once. Disputing returns the claim to `under_review` for re-adjudication. A claim cannot be disputed more than once.
+-
+----
+-
+-## Out of Scope
+-
+-- Riders / policy add-ons
+-- Family / group plans and shared accumulators
+-- Coordination of Benefits (COB) / secondary insurance
+-- Distinction between billed amount and contracted/allowed amount
+-- Out-of-pocket maximum
+-- Prior authorization
+-- Out-of-network claims
+diff --git a/docs/domain_model_review_skill.md b/docs/domain_model_review_skill.md
+deleted file mode 100644
+index d2af2a3..0000000
+--- a/docs/domain_model_review_skill.md
++++ /dev/null
+@@ -1,81 +0,0 @@
+-Review the markdown file at docs/data_model.md which defines the domain model for a claims processing system.
+-This model will be directly implemented as database tables (SQLite + SQLAlchemy ORM),
+-API endpoints (Flask), and frontend state. Your job is to find every issue that would
+-cause problems during implementation or at runtime — before a single line of code is written.
+-
+-Work through each section below systematically. For each finding, state:
+-- SEVERITY: BLOCKER | MAJOR | MINOR
+-- LOCATION: which entity/relationship/state machine
+-- PROBLEM: what is wrong or ambiguous
+-- RECOMMENDATION: the specific fix
+-
+----
+-
+-## 1. Entity Completeness
+-- Is every real-world object that the system must track represented?
+-- Are there entities implied by relationships that are not explicitly defined (e.g., a many-to-many requires a join entity)?
+-- Are all attributes present for each entity to satisfy the acceptance criteria?
+-- Are attribute types, nullability, and default values specified where they matter?
+-- Are there computed/derived attributes that should be stored vs. calculated?
+-
+-## 2. Relationship Correctness
+-- Verify cardinality (1:1, 1:N, M:N) for every relationship. Check each direction independently.
+-- Are all foreign keys explicitly named? Which side owns the FK?
+-- For every M:N relationship: is there a join/association entity? Does it need its own attributes?
+-- Are cascade rules defined (what happens to children when a parent is deleted/updated)?
+-- Are there circular dependencies that would cause issues in ORM or migration order?
+-- Are there relationships that are optional vs. required — and is that clearly stated?
+-
+-## 3. State Machine Correctness
+-- For each state machine, list all states and verify:
+-  - Is there exactly one initial state?
+-  - Are all terminal (absorbing) states correct and complete?
+-  - Is every state reachable from the initial state?
+-  - Are there dead states (states with no outgoing transitions that are not intended terminals)?
+-- For each transition, verify:
+-  - Is the trigger/event defined?
+-  - Are guard conditions specified where a transition only applies in certain cases?
+-  - Are side effects (actions on entry/exit) documented?
+-  - Can two transitions fire simultaneously from the same state — and if so, is the conflict resolved?
+-- Cross-entity state dependencies: if entity A's state constrains entity B's allowed transitions, is that captured?
+-- Are there implicit state transitions buried in business rules that should be made explicit?
+-
+-## 4. Internal Consistency
+-- Every entity referenced in a relationship must be defined — flag any dangling references.
+-- Every state referenced in a transition must be in the state list for that machine.
+-- Attribute names used in guard conditions must exist on the relevant entity.
+-- Naming: are the same concepts referred to by different names in different sections?
+-
+-## 5. Business Rule Coverage
+-- Cross-reference every rule in the acceptance criteria against the model. Flag any rule that has no corresponding entity attribute, relationship, or state transition to enforce it.
+-- Are all validation rules (e.g., claim amount <= coverage limit) expressible with the current model, or would they require attributes that don't exist?
+-- Are audit/history requirements (who changed what, when) addressed by the model?
+-
+-## 6. Implementability
+-- Would a developer need to make any non-trivial assumptions to map this model to ORM classes? List each ambiguity.
+-- Are there attributes that need indexing for expected query patterns (e.g., status lookups, date range queries)?
+-- Are soft deletes vs. hard deletes addressed for any entity?
+-- For state machines: is the current state stored as an attribute on the entity? Is its type (enum, string) specified?
+-- Is there anything in the model that would require a migration to fix after initial implementation?
+-
+-## 7. Summary
+-End with:
+-1. A prioritized list of all BLOCKERs that must be resolved before implementation begins.
+-2. A list of open questions where the model is ambiguous and a decision is needed.
+-3. An overall assessment: is this model ready to implement, or does it need another revision?
+-
+----
+-
+-## 8. Query Efficiency Analysis
+-
+-1. **Infer common read paths** — what queries will the application need to run given the domain (e.g. "load a claim with all its line items and current adjudication results"). For each, write out the approximate SQL (tables joined, WHERE clauses, ORDER BY).
+-
+-2. **Infer common write paths** — what INSERTs/UPDATEs/DELETEs will the application need, and in what transactional groupings. Note any ordering constraints (e.g. parent must exist before child).
+-
+-3. **Recommend indexes** — for each read path, identify which columns need indexes (foreign keys, filter columns, sort columns). Flag any unique constraints mentioned in the model that should be enforced at the DB level.
+-
+-4. **Flag efficiency risks** — N+1 patterns that are likely given the relationships, queries that will require full scans without indexes, any "get the latest revision" or "get current result" patterns that need special handling.
+-
+-5. **Summarize** as a prioritized list of index recommendations and query design decisions to make before implementation, so they can be built in from the start rather than retrofitted.
+-
+-Feel free to recommend a design change if required instead of just focus on index recommendations and query design decisions.
+\ No newline at end of file
