@@ -12,6 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     Date,
@@ -379,6 +380,7 @@ class Dispute(Base):
         Enum(DisputeStatus), nullable=False, default=DisputeStatus.pending
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    line_item_updates: Mapped[list[dict[str, object]] | None] = mapped_column(JSON, nullable=True)
 
     claim: Mapped[Claim] = relationship("Claim", back_populates="dispute")
 

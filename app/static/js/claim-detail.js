@@ -172,6 +172,30 @@ function renderActionSections(claim) {
         sections.push(`
             <div class="card" id="dispute-card">
                 <div class="card__title">Submit Dispute</div>
+                <div style="margin-bottom:16px">
+                    <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:8px">LINE ITEM CORRECTIONS (optional)</div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>CPT Code</th>
+                                    <th class="text-right">Billed</th>
+                                    <th>Corrected CPT</th>
+                                    <th>Corrected Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${claim.line_items.map(li => `
+                                    <tr>
+                                        <td class="text-mono">${li.cpt_code}</td>
+                                        <td class="text-right text-mono">${fmt(li.billed_amount)}</td>
+                                        <td><input class="form-control li-cpt-input" data-li-id="${li.id}" placeholder="${li.cpt_code}" style="width:110px"></td>
+                                        <td><input class="form-control li-amount-input" data-li-id="${li.id}" type="number" min="0.01" step="0.01" placeholder="${parseFloat(li.billed_amount).toFixed(2)}" style="width:120px"></td>
+                                    </tr>`).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
                 <div class="form-group">
                     <label for="dispute-reason">Reason</label>
                     <textarea id="dispute-reason" class="form-control" rows="3"
@@ -198,6 +222,23 @@ function renderActionSections(claim) {
                     <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">REASON</div>
                     <div>${claim.dispute.reason}</div>
                 </div>
+                ${claim.dispute.line_item_updates && claim.dispute.line_item_updates.length > 0 ? `
+                <div style="margin-top:10px">
+                    <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">MEMBER CORRECTIONS</div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead><tr><th>Line Item</th><th>Corrected CPT</th><th>Corrected Amount</th></tr></thead>
+                            <tbody>
+                                ${claim.dispute.line_item_updates.map(u => `
+                                    <tr>
+                                        <td class="id-mono">${u.line_item_id.slice(0, 8)}…</td>
+                                        <td class="text-mono">${u.cpt_code ?? "—"}</td>
+                                        <td class="text-mono">${u.billed_amount != null ? fmt(u.billed_amount) : "—"}</td>
+                                    </tr>`).join("")}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>` : ""}
                 ${claim.dispute.reviewer_note ? `
                 <div style="margin-top:10px">
                     <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">REVIEWER NOTE</div>
@@ -228,10 +269,26 @@ function renderActionSections(claim) {
             const reason = document.getElementById("dispute-reason").value.trim();
             const errEl  = document.getElementById("dispute-error");
             if (!reason) { showError(errEl, "Reason is required."); return; }
+
+            const liIds = [...new Set(
+                [...document.querySelectorAll("[data-li-id]")].map(el => el.dataset.liId)
+            )];
+            const lineItemUpdates = [];
+            for (const liId of liIds) {
+                const cptVal    = document.querySelector(`.li-cpt-input[data-li-id="${liId}"]`).value.trim();
+                const amountVal = document.querySelector(`.li-amount-input[data-li-id="${liId}"]`).value.trim();
+                if (cptVal || amountVal) {
+                    const entry = { line_item_id: liId };
+                    if (cptVal) entry.cpt_code = cptVal;
+                    if (amountVal) entry.billed_amount = amountVal;
+                    lineItemUpdates.push(entry);
+                }
+            }
+
             disputeBtn.disabled = true;
             disputeBtn.textContent = "Submitting…";
             try {
-                await api.submitDispute(claim.id, reason);
+                await api.submitDispute(claim.id, reason, lineItemUpdates.length ? lineItemUpdates : null);
                 loadClaim();
             } catch (err) {
                 showError(errEl, err.message);

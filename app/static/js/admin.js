@@ -439,6 +439,25 @@ function renderDisputeCard(claim) {
                 <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">DISPUTE REASON</div>
                 <div>${d.reason}</div>
             </div>
+            ${d.line_item_updates && d.line_item_updates.length > 0 ? `
+            <div style="margin-bottom:10px">
+                <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:6px">MEMBER CORRECTIONS</div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>Line Item</th><th>Corrected CPT</th><th>Corrected Amount</th></tr>
+                        </thead>
+                        <tbody>
+                            ${d.line_item_updates.map(u => `
+                                <tr>
+                                    <td class="id-mono">${u.line_item_id.slice(0, 8)}…</td>
+                                    <td class="text-mono">${u.cpt_code ?? "—"}</td>
+                                    <td class="text-mono">${u.billed_amount != null ? "$" + parseFloat(u.billed_amount).toFixed(2) : "—"}</td>
+                                </tr>`).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            </div>` : ""}
             <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
                 Submitted: ${new Date(d.submitted_at).toLocaleString()}
             </div>

@@ -87,6 +87,7 @@ def _serialize_dispute(dispute: Dispute) -> dict[str, object]:
         "submitted_at": dispute.submitted_at.isoformat(),
         "resolved_at": dispute.resolved_at.isoformat() if dispute.resolved_at else None,
         "reviewer_note": dispute.reviewer_note,
+        "line_item_updates": dispute.line_item_updates,
     }
 
 
@@ -233,7 +234,8 @@ def submit_dispute(claim_id: str) -> tuple[Response, int]:
     reason: str = data.get("reason") or ""
     if not reason:
         raise BadRequestError("reason is required")
-    dispute = dispute_service.submit_dispute(claim_id, reason)
+    line_item_updates: list[dict[str, object]] | None = data.get("line_item_updates") or None
+    dispute = dispute_service.submit_dispute(claim_id, reason, line_item_updates)
     return jsonify(_serialize_dispute(dispute)), 201
 
 

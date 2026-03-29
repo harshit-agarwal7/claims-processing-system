@@ -359,3 +359,163 @@ class TestListDisputedClaims:
         resp = client.get("/api/claims?disputed=true")
         assert resp.status_code == 200
         assert resp.get_json() == []
+
+
+# ---------------------------------------------------------------------------
+# POST /api/claims/<id>/disputes — line item corrections
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitDisputeWithLineItemUpdatesAPI:
+    """POST /api/claims/<id>/disputes with line_item_updates."""
+
+    def test_line_item_updates_applied_and_visible_in_claim(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """Corrections are applied to the line item and returned in the claim detail."""
+        claim_id = _submit_denied_claim(client, seed)
+        claim_data = client.get(f"/api/claims/{claim_id}").get_json()
+        li_id = claim_data["line_items"][0]["id"]
+
+        resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={
+                "reason": "Wrong CPT code.",
+                "line_item_updates": [{"line_item_id": li_id, "cpt_code": "99213"}],
+            },
+        )
+        assert resp.status_code == 201
+
+        updated_claim = client.get(f"/api/claims/{claim_id}").get_json()
+        assert updated_claim["line_items"][0]["cpt_code"] == "99213"
+
+    def test_line_item_updates_stored_on_dispute(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """The submitted line_item_updates are returned in the dispute resource."""
+        claim_id = _submit_denied_claim(client, seed)
+        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
+        updates = [{"line_item_id": li_id, "billed_amount": "180.00"}]
+
+        client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={"reason": "Amount wrong.", "line_item_updates": updates},
+        )
+
+        dispute_data = client.get(f"/api/claims/{claim_id}/dispute").get_json()
+        assert dispute_data["line_item_updates"] == updates
+
+    def test_unknown_line_item_id_returns_400(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """An unknown line_item_id returns 400."""
+        claim_id = _submit_denied_claim(client, seed)
+        resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={
+                "reason": "Bad ID.",
+                "line_item_updates": [
+                    {
+                        "line_item_id": "00000000-0000-0000-0000-000000000000",
+                        "cpt_code": "99213",
+                    }
+                ],
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_zero_billed_amount_returns_400(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """A billed_amount of zero returns 400."""
+        claim_id = _submit_denied_claim(client, seed)
+        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
+        resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={
+                "reason": "Amount.",
+                "line_item_updates": [{"line_item_id": li_id, "billed_amount": "0.00"}],
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_negative_billed_amount_returns_400(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """A negative billed_amount returns 400."""
+        claim_id = _submit_denied_claim(client, seed)
+        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
+        resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={
+                "reason": "Amount.",
+                "line_item_updates": [{"line_item_id": li_id, "billed_amount": "-10.00"}],
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_empty_cpt_code_returns_400(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """An empty cpt_code returns 400."""
+        claim_id = _submit_denied_claim(client, seed)
+        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
+        resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={
+                "reason": "CPT.",
+                "line_item_updates": [{"line_item_id": li_id, "cpt_code": ""}],
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_no_line_item_updates_still_works(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """Submitting without line_item_updates is backward-compatible and returns 201."""
+        claim_id = _submit_denied_claim(client, seed)
+        resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={"reason": "No corrections needed."},
+        )
+        assert resp.status_code == 201
+        assert resp.get_json()["line_item_updates"] is None
+
+    def test_cpt_correction_auto_adjudicates_to_paid(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """Full flow: denied claim with corrected CPT → auto-adjudicates to paid at submission."""
+        # Use a large billed amount to exceed the $500 deductible so plan pays something
+        resp = client.post(
+            "/api/claims",
+            json={
+                "member_id": seed.member.id,
+                "provider_id": seed.provider.id,
+                "date_of_service": "2026-03-01",
+                "line_items": [
+                    {"diagnosis_code": "M54.5", "cpt_code": "00000", "billed_amount": "700.00"}
+                ],
+            },
+        )
+        assert resp.status_code == 201
+        claim_id = resp.get_json()["id"]
+        assert resp.get_json()["status"] == "denied"
+
+        li_id = client.get(f"/api/claims/{claim_id}").get_json()["line_items"][0]["id"]
+
+        dispute_resp = client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={
+                "reason": "Correct CPT should be 99213.",
+                "line_item_updates": [{"line_item_id": li_id, "cpt_code": "99213"}],
+            },
+        )
+        assert dispute_resp.status_code == 201
+
+        # Claim should already be paid — no manual adjudication step needed.
+        claim_data = client.get(f"/api/claims/{claim_id}").get_json()
+        assert claim_data["status"] == "paid"
+
+        # Manually triggering adjudication on an auto-resolved claim returns 409.
+        adj_resp = client.post(f"/api/claims/{claim_id}/adjudicate", json={})
+        assert adj_resp.status_code == 409

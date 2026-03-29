@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 
-from app.errors import ConflictError, NotFoundError
+from app.errors import BadRequestError, ConflictError, NotFoundError
 from app.extensions import db
 from app.models import (
     Claim,
@@ -20,15 +20,27 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 
-def submit_dispute(claim_id: str, reason: str) -> Dispute:
+def submit_dispute(
+    claim_id: str,
+    reason: str,
+    line_item_updates: list[dict[str, object]] | None = None,
+) -> Dispute:
     """Submit a dispute for a denied or partially-approved claim.
 
     Transitions the claim to ``under_review`` with ``review_type=manual`` and
     creates a ``Dispute`` row with ``status=pending``.
 
+    If *line_item_updates* is provided, the corrections are applied to the
+    matching ``LineItem`` rows in-place before the status transition, so that
+    re-adjudication uses the corrected data automatically.
+
     Args:
         claim_id: UUID string of the claim to dispute.
         reason: The member's reason for disputing the claim.
+        line_item_updates: Optional list of per-line-item corrections.  Each
+            entry must include ``line_item_id`` and at least one of
+            ``billed_amount`` (positive Decimal-compatible string) or
+            ``cpt_code`` (non-empty string).
 
     Returns:
         The newly created Dispute.
@@ -38,6 +50,8 @@ def submit_dispute(claim_id: str, reason: str) -> Dispute:
         ConflictError: If the claim status does not allow a dispute (not
             ``denied`` or ``partially_approved``), or if the claim has already
             been disputed.
+        BadRequestError: If any *line_item_id* does not belong to the claim,
+            *billed_amount* is not positive, or *cpt_code* is empty.
     """
     claim: Claim | None = db.session.get(Claim, claim_id)
     if claim is None:
@@ -54,8 +68,67 @@ def submit_dispute(claim_id: str, reason: str) -> Dispute:
 
     old_status = claim.status
     claim.status = ClaimStatus.under_review
-    claim.review_type = ReviewType.manual
 
+    if line_item_updates:
+        # Apply corrections in-place so re-adjudication uses the corrected data.
+        # Only provided fields are updated; omitted fields retain their current values.
+        li_index = {li.id: li for li in claim.line_items if li.deleted_at is None}
+        for upd in line_item_updates:
+            li_id = upd.get("line_item_id")
+            if not li_id or li_id not in li_index:
+                raise BadRequestError(f"Line item {li_id!r} does not belong to claim {claim_id!r}")
+            li = li_index[str(li_id)]
+            if "billed_amount" in upd:
+                try:
+                    amount = Decimal(str(upd["billed_amount"]))
+                except Exception:
+                    raise BadRequestError("billed_amount must be a valid number")
+                if amount <= Decimal("0"):
+                    raise BadRequestError("billed_amount must be greater than 0")
+                li.billed_amount = amount
+            if "cpt_code" in upd:
+                cpt = str(upd["cpt_code"]).strip()
+                if not cpt:
+                    raise BadRequestError("cpt_code must be a non-empty string")
+                li.cpt_code = cpt
+
+        # Corrections provided — auto-adjudicate immediately; no manual review needed.
+        claim.review_type = ReviewType.auto
+        db.session.add(
+            ClaimStatusHistory(
+                claim_id=claim.id,
+                from_status=old_status,
+                to_status=ClaimStatus.under_review,
+                note="Dispute submitted by member with corrections; auto-adjudicating.",
+            )
+        )
+        dispute = Dispute(
+            claim_id=claim.id,
+            reason=reason,
+            line_item_updates=line_item_updates,
+            status=DisputeStatus.resolved,
+            resolved_at=datetime.utcnow(),
+        )
+        # Assign via relationship so SQLAlchemy back-populates claim.dispute in-memory,
+        # allowing the adjudication engine to detect the resolved dispute in step 8.
+        claim.dispute = dispute
+        db.session.flush()
+
+        # Import here to avoid circular imports at module load time
+        from app.services.adjudication_engine import AdjudicationEngine
+
+        AdjudicationEngine().run(claim.id)
+
+        db.session.refresh(dispute)
+        logger.info(
+            "claim %s dispute with corrections submitted; auto-adjudicated; final status=%s",
+            claim.id,
+            claim.status.value,
+        )
+        return dispute
+
+    # No corrections — manual review required.
+    claim.review_type = ReviewType.manual
     db.session.add(
         ClaimStatusHistory(
             claim_id=claim.id,
@@ -64,8 +137,11 @@ def submit_dispute(claim_id: str, reason: str) -> Dispute:
             note="Dispute submitted by member.",
         )
     )
-
-    dispute = Dispute(claim_id=claim.id, reason=reason)
+    dispute = Dispute(
+        claim_id=claim.id,
+        reason=reason,
+        line_item_updates=None,
+    )
     db.session.add(dispute)
     db.session.commit()
 
