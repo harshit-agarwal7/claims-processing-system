@@ -9,10 +9,15 @@ class TestCreatePolicy:
     """POST /api/policies"""
 
     def test_happy_path_returns_201(self, client: FlaskClient, seed: types.SimpleNamespace) -> None:
+        # Create a fresh member with no existing policy
+        new_member = client.post(
+            "/api/members",
+            json={"name": "New Member", "date_of_birth": "1990-01-01", "email": "new@example.com"},
+        ).get_json()
         resp = client.post(
             "/api/policies",
             json={
-                "member_id": seed.member.id,
+                "member_id": new_member["id"],
                 "plan_id": seed.plan.id,
                 "start_date": "2027-01-01",
                 "end_date": "2027-12-31",
@@ -20,7 +25,7 @@ class TestCreatePolicy:
         )
         assert resp.status_code == 201
         data = resp.get_json()
-        assert data["member_id"] == seed.member.id
+        assert data["member_id"] == new_member["id"]
         assert data["plan_id"] == seed.plan.id
         assert data["start_date"] == "2027-01-01"
         assert data["end_date"] == "2027-12-31"
@@ -33,10 +38,15 @@ class TestCreatePolicy:
         from app.extensions import db
         from app.models import Accumulator
 
+        # Create a fresh member with no existing policy
+        new_member = client.post(
+            "/api/members",
+            json={"name": "Acc Member", "date_of_birth": "1991-01-01", "email": "acc@example.com"},
+        ).get_json()
         resp = client.post(
             "/api/policies",
             json={
-                "member_id": seed.member.id,
+                "member_id": new_member["id"],
                 "plan_id": seed.plan.id,
                 "start_date": "2027-01-01",
                 "end_date": "2027-12-31",
@@ -141,6 +151,21 @@ class TestCreatePolicy:
             },
         )
         assert resp.status_code == 400
+
+    def test_duplicate_active_policy_returns_409(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        # seed already has an active policy for seed.member; creating another must be rejected
+        resp = client.post(
+            "/api/policies",
+            json={
+                "member_id": seed.member.id,
+                "plan_id": seed.plan.id,
+                "start_date": "2027-01-01",
+                "end_date": "2027-12-31",
+            },
+        )
+        assert resp.status_code == 409
 
 
 class TestGetPolicy:

@@ -202,3 +202,33 @@ class TestGetActivePolicyForMember:
     def test_unknown_member_returns_404(self, client: FlaskClient) -> None:
         resp = client.get("/api/members/ghost/policies/active")
         assert resp.status_code == 404
+
+
+class TestListMemberPolicies:
+    """GET /api/members/<id>/policies"""
+
+    def test_returns_existing_policies(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        resp = client.get(f"/api/members/{seed.member.id}/policies")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["id"] == seed.policy.id
+        assert data[0]["status"] == "active"
+        assert data[0]["plan_name"] == seed.plan.name
+        assert "deductible" in data[0]
+
+    def test_returns_empty_list_when_no_policies(self, client: FlaskClient) -> None:
+        resp = client.post(
+            "/api/members",
+            json={"name": "No Policy", "date_of_birth": "2000-01-01", "email": "nopol@example.com"},
+        )
+        member_id = resp.get_json()["id"]
+        resp = client.get(f"/api/members/{member_id}/policies")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    def test_unknown_member_returns_404(self, client: FlaskClient) -> None:
+        resp = client.get("/api/members/ghost/policies")
+        assert resp.status_code == 404

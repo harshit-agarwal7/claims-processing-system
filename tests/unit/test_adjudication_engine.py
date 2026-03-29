@@ -313,6 +313,10 @@ class TestDeductibleTracking:
         assert old_acc is not None
         assert old_acc.deductible_met == Decimal("500.00")
 
+        # Expire the old policy before creating the new one (enforced by uniqueness constraint)
+        seed.policy.status = PolicyStatus.expired
+        db.session.flush()
+
         # New policy period for the same member + plan
         new_policy = Policy(
             member_id=seed.member.id,

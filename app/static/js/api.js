@@ -19,6 +19,7 @@ export const api = {
     getMember: (id) => request("GET", `/members/${id}`),
     getMemberClaims: (id) => request("GET", `/members/${id}/claims`),
     getActivePolicyForMember: (id) => request("GET", `/members/${id}/policies/active`),
+    listMemberPolicies: (id) => request("GET", `/members/${id}/policies`),
 
     // Providers
     listProviders: () => request("GET", "/providers"),

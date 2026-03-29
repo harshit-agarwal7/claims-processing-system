@@ -193,6 +193,34 @@ def list_member_claims(member_id: str) -> Response:
     return jsonify(result)
 
 
+@bp.route("/<member_id>/policies", methods=["GET"])
+def list_member_policies(member_id: str) -> Response:
+    """List all policies for a member.
+
+    Args:
+        member_id: UUID of the member.
+
+    Returns:
+        200 with a list of policy objects, or 404 if member not found.
+    """
+    member = db.session.execute(
+        db.select(Member).where(Member.id == member_id, Member.deleted_at.is_(None))
+    ).scalar_one_or_none()
+    if member is None:
+        raise NotFoundError(f"Member '{member_id}' not found")
+
+    policies = (
+        db.session.execute(
+            db.select(Policy)
+            .where(Policy.member_id == member_id, Policy.deleted_at.is_(None))
+            .order_by(Policy.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return jsonify([_serialize_policy(p) for p in policies])
+
+
 @bp.route("/<member_id>/policies/active", methods=["GET"])
 def get_active_policy(member_id: str) -> Response:
     """Get the currently active policy for a member.

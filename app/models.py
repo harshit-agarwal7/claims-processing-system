@@ -18,11 +18,13 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -155,6 +157,12 @@ class Policy(Base):
     __tablename__ = "policies"
     __table_args__ = (
         CheckConstraint("end_date >= start_date", name="ck_policies_end_after_start"),
+        Index(
+            "ix_policies_member_id_active",
+            "member_id",
+            unique=True,
+            sqlite_where=text("status = 'active' AND deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

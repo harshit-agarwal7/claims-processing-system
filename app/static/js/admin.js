@@ -251,12 +251,37 @@ const createPolicyBtn = document.getElementById("create-policy-btn");
 const planSelect      = document.getElementById("policy-plan-id");
 const memberLookupBtn = document.getElementById("member-lookup-btn");
 const memberLookupResult = document.getElementById("member-lookup-result");
+const memberPoliciesList = document.getElementById("member-policies-list");
 let policyMemberId = null;
+
+function renderMemberPolicies(policies) {
+    if (policies.length === 0) {
+        memberPoliciesList.innerHTML = `<div class="empty-state" style="font-size:13px">No existing policies for this member.</div>`;
+        return;
+    }
+    memberPoliciesList.innerHTML = `
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--text-muted)">Existing Policies</div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Plan</th><th>Status</th><th>Start</th><th>End</th></tr></thead>
+                <tbody>
+                    ${policies.map(p => `
+                        <tr>
+                            <td>${p.plan_name}</td>
+                            <td>${p.status}</td>
+                            <td>${p.start_date}</td>
+                            <td>${p.end_date}</td>
+                        </tr>`).join("")}
+                </tbody>
+            </table>
+        </div>`;
+}
 
 memberLookupBtn.addEventListener("click", async () => {
     const val = document.getElementById("policy-member-input").value.trim();
     if (!val) return;
     memberLookupResult.innerHTML = "";
+    memberPoliciesList.innerHTML = "";
     policyMemberId = null;
     try {
         let member;
@@ -267,6 +292,8 @@ memberLookupBtn.addEventListener("click", async () => {
         }
         policyMemberId = member.id;
         memberLookupResult.innerHTML = `<div class="alert alert-info">Found: <strong>${member.name}</strong> <span class="id-mono">${member.id}</span></div>`;
+        const policies = await api.listMemberPolicies(member.id);
+        renderMemberPolicies(policies);
     } catch (err) {
         showError(memberLookupResult, err.message);
     }
@@ -300,6 +327,7 @@ createPolicyBtn.addEventListener("click", async () => {
         showSuccess(policyFormMsg, "Policy created successfully.");
         policyMemberId = null;
         memberLookupResult.innerHTML = "";
+        memberPoliciesList.innerHTML = "";
         document.getElementById("policy-member-input").value = "";
         planSelect.value = "";
         document.getElementById("policy-start").value = "";

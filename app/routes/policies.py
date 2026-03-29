@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from flask import Blueprint, Response, jsonify, request
 
-from app.errors import BadRequestError, NotFoundError
+from app.errors import BadRequestError, ConflictError, NotFoundError
 from app.extensions import db
 from app.models import Accumulator, Member, Plan, Policy, PolicyStatus
 
@@ -77,6 +77,16 @@ def create_policy() -> tuple[Response, int]:
     ).scalar_one_or_none()
     if plan is None:
         raise NotFoundError(f"Plan '{plan_id}' not found")
+
+    existing_active = db.session.execute(
+        db.select(Policy).where(
+            Policy.member_id == member_id,
+            Policy.status == PolicyStatus.active,
+            Policy.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
+    if existing_active is not None:
+        raise ConflictError(f"Member '{member_id}' already has an active policy")
 
     policy = Policy(
         member_id=member_id,
