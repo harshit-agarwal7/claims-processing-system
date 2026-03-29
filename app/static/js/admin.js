@@ -404,8 +404,79 @@ createMemberBtn.addEventListener("click", async () => {
     }
 });
 
+// ════════════════════════════════════════════════════════
+// Disputes tab
+// ════════════════════════════════════════════════════════
+const disputesList = document.getElementById("disputes-list");
+
+async function loadDisputes() {
+    disputesList.innerHTML = `<div class="skeleton" style="height:60px"></div>`;
+    try {
+        const claims = await api.listDisputedClaims();
+        if (claims.length === 0) {
+            disputesList.innerHTML = `<div class="empty-state">No pending disputes.</div>`;
+            return;
+        }
+        disputesList.innerHTML = claims.map(c => renderDisputeCard(c)).join("");
+        claims.forEach(c => wireDisputeCard(c));
+    } catch (err) {
+        showError(disputesList, err.message);
+    }
+}
+
+function renderDisputeCard(claim) {
+    const d = claim.dispute;
+    return `
+        <div class="card" style="margin-bottom:12px" id="dispute-card-${claim.id}">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+                <div>
+                    <span class="id-mono">${claim.id}</span>
+                    <span style="margin-left:10px;font-weight:600">${claim.member.name}</span>
+                </div>
+                <div style="color:var(--text-muted);font-size:13px">Date of service: <strong>${claim.date_of_service}</strong></div>
+            </div>
+            <div style="margin-bottom:10px">
+                <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:4px">DISPUTE REASON</div>
+                <div>${d.reason}</div>
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+                Submitted: ${new Date(d.submitted_at).toLocaleString()}
+            </div>
+            <div class="form-group">
+                <label for="reviewer-note-${claim.id}">Reviewer Note (optional)</label>
+                <textarea id="reviewer-note-${claim.id}" class="form-control" rows="3"
+                    placeholder="Notes from the reviewer…" style="resize:vertical"></textarea>
+            </div>
+            <div id="readjudicate-error-${claim.id}"></div>
+            <div class="form-actions">
+                <button id="readjudicate-btn-${claim.id}" class="btn btn-primary"
+                    data-claim="${claim.id}">Trigger Re-adjudication</button>
+            </div>
+        </div>`;
+}
+
+function wireDisputeCard(claim) {
+    const btn   = document.getElementById(`readjudicate-btn-${claim.id}`);
+    const errEl = document.getElementById(`readjudicate-error-${claim.id}`);
+    if (!btn) return;
+    btn.addEventListener("click", async () => {
+        const note = document.getElementById(`reviewer-note-${claim.id}`).value.trim() || null;
+        btn.disabled = true;
+        btn.textContent = "Processing…";
+        try {
+            await api.adjudicate(claim.id, note);
+            await loadDisputes();
+        } catch (err) {
+            showError(errEl, err.message);
+            btn.disabled = false;
+            btn.textContent = "Trigger Re-adjudication";
+        }
+    });
+}
+
 // ── Init ─────────────────────────────────────────────────
 loadPlans();
 loadProviders();
 populatePlanSelect();
 loadMembers();
+loadDisputes();

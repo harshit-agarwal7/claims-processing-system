@@ -302,3 +302,60 @@ class TestAcceptPaymentAPI:
         claim_id = _submit_denied_claim(client, seed)
         resp = client.post(f"/api/claims/{claim_id}/accept")
         assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# GET /api/claims?disputed=true
+# ---------------------------------------------------------------------------
+
+
+class TestListDisputedClaims:
+    """GET /api/claims?disputed=true"""
+
+    def test_returns_empty_list_when_no_disputes(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """Returns an empty list when no claims are under manual review."""
+        resp = client.get("/api/claims?disputed=true")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    def test_returns_disputed_claim_in_list(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """Returns a claim that is under_review/manual with a pending dispute."""
+        claim_id = _submit_denied_claim(client, seed)
+        client.post(
+            f"/api/claims/{claim_id}/disputes",
+            json={"reason": "I believe this is covered."},
+        )
+
+        resp = client.get("/api/claims?disputed=true")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["id"] == claim_id
+        assert data[0]["status"] == "under_review"
+        assert data[0]["review_type"] == "manual"
+        assert data[0]["dispute"]["status"] == "pending"
+        assert data[0]["member"]["name"] == seed.member.name
+
+    def test_does_not_return_non_disputed_claims(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        """Claims that are not under manual review with a pending dispute are excluded."""
+        client.post(
+            "/api/claims",
+            json={
+                "member_id": seed.member.id,
+                "provider_id": seed.provider.id,
+                "date_of_service": "2026-03-01",
+                "line_items": [
+                    {"diagnosis_code": "M54.5", "cpt_code": "99213", "billed_amount": "200.00"}
+                ],
+            },
+        )
+
+        resp = client.get("/api/claims?disputed=true")
+        assert resp.status_code == 200
+        assert resp.get_json() == []

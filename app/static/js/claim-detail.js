@@ -206,23 +206,6 @@ function renderActionSections(claim) {
             </div>`);
     }
 
-    // Re-adjudication card (under_review + manual)
-    if (claim.status === "under_review" && claim.review_type === "manual") {
-        sections.push(`
-            <div class="card" id="readjudicate-card">
-                <div class="card__title">Trigger Re-adjudication</div>
-                <div class="form-group">
-                    <label for="reviewer-note">Reviewer Note (optional)</label>
-                    <textarea id="reviewer-note" class="form-control" rows="3"
-                        placeholder="Notes from the reviewer…" style="resize:vertical"></textarea>
-                </div>
-                <div id="readjudicate-error"></div>
-                <div class="form-actions">
-                    <button id="readjudicate-btn" class="btn btn-primary">Trigger Re-adjudication</button>
-                </div>
-            </div>`);
-    }
-
     // Accept payment button (partially_approved, no dispute)
     if (claim.status === "partially_approved" && !claim.dispute) {
         sections.push(`
@@ -254,25 +237,6 @@ function renderActionSections(claim) {
                 showError(errEl, err.message);
                 disputeBtn.disabled = false;
                 disputeBtn.textContent = "Submit Dispute";
-            }
-        });
-    }
-
-    // Wire re-adjudication
-    const readjBtn = document.getElementById("readjudicate-btn");
-    if (readjBtn) {
-        readjBtn.addEventListener("click", async () => {
-            const note  = document.getElementById("reviewer-note").value.trim() || null;
-            const errEl = document.getElementById("readjudicate-error");
-            readjBtn.disabled = true;
-            readjBtn.textContent = "Processing…";
-            try {
-                await api.adjudicate(claim.id, note);
-                loadClaim();
-            } catch (err) {
-                showError(errEl, err.message);
-                readjBtn.disabled = false;
-                readjBtn.textContent = "Trigger Re-adjudication";
             }
         });
     }

@@ -6,7 +6,16 @@ from flask import Blueprint, Response, jsonify, request
 
 from app.errors import BadRequestError, NotFoundError
 from app.extensions import db
-from app.models import AdjudicationResult, Claim, Dispute, LineItem, Payment
+from app.models import (
+    AdjudicationResult,
+    Claim,
+    ClaimStatus,
+    Dispute,
+    DisputeStatus,
+    LineItem,
+    Payment,
+    ReviewType,
+)
 from app.services import claim_service, dispute_service
 
 logger = logging.getLogger(__name__)
@@ -157,6 +166,39 @@ def submit_claim() -> tuple[Response, int]:
     data = request.get_json(silent=True) or {}
     claim = claim_service.submit_claim(data)
     return jsonify(_serialize_claim(claim)), 201
+
+
+@bp.route("", methods=["GET"])
+def list_claims() -> Response:
+    """List claims filtered by query parameters.
+
+    Query Parameters:
+        disputed: If "true", return only claims under manual review
+            that have a pending dispute.
+
+    Returns:
+        200 with a JSON array of serialized claim objects.
+    """
+    disputed_param: str | None = request.args.get("disputed")
+    if disputed_param == "true":
+        rows = (
+            db.session.execute(
+                db.select(Claim)
+                .join(Dispute, Dispute.claim_id == Claim.id)
+                .where(
+                    Claim.deleted_at.is_(None),
+                    Claim.status == ClaimStatus.under_review,
+                    Claim.review_type == ReviewType.manual,
+                    Dispute.status == DisputeStatus.pending,
+                    Dispute.deleted_at.is_(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    else:
+        rows = []
+    return jsonify([_serialize_claim(c) for c in rows])
 
 
 @bp.route("/<claim_id>", methods=["GET"])

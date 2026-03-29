@@ -38,6 +38,7 @@ export const api = {
     // Claims
     submitClaim: (data) => request("POST", "/claims", data),
     getClaim: (id) => request("GET", `/claims/${id}`),
+    listDisputedClaims: () => request("GET", "/claims?disputed=true"),
     submitDispute: (id, reason) => request("POST", `/claims/${id}/disputes`, { reason }),
     adjudicate: (id, reviewerNote) => request("POST", `/claims/${id}/adjudicate`, { reviewer_note: reviewerNote }),
     acceptPayment: (id) => request("POST", `/claims/${id}/accept`),
