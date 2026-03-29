@@ -89,6 +89,29 @@ def create_member() -> tuple[Response, int]:
     return jsonify(_serialize_member(member)), 201
 
 
+@bp.route("/lookup", methods=["GET"])
+def lookup_member_by_email() -> Response:
+    """Look up a member by email address.
+
+    Query params:
+        email: The member's email address.
+
+    Returns:
+        200 with member data, 400 if email is missing, or 404 if not found.
+    """
+    email = request.args.get("email", "").strip()
+    if not email:
+        raise BadRequestError("email query parameter is required")
+
+    member = db.session.execute(
+        db.select(Member).where(Member.email == email, Member.deleted_at.is_(None))
+    ).scalar_one_or_none()
+    if member is None:
+        raise NotFoundError(f"No member found with email '{email}'")
+
+    return jsonify(_serialize_member(member))
+
+
 @bp.route("/<member_id>", methods=["GET"])
 def get_member(member_id: str) -> Response:
     """Retrieve a single member by ID.

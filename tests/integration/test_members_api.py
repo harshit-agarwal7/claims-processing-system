@@ -113,6 +113,28 @@ class TestListMemberClaims:
         assert resp.status_code == 404
 
 
+class TestLookupMemberByEmail:
+    """GET /api/members/lookup?email=<email>"""
+
+    def test_returns_member_for_known_email(
+        self, client: FlaskClient, seed: types.SimpleNamespace
+    ) -> None:
+        resp = client.get(f"/api/members/lookup?email={seed.member.email}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["id"] == seed.member.id
+        assert data["email"] == seed.member.email
+        assert data["name"] == seed.member.name
+
+    def test_missing_email_param_returns_400(self, client: FlaskClient) -> None:
+        resp = client.get("/api/members/lookup")
+        assert resp.status_code == 400
+
+    def test_unknown_email_returns_404(self, client: FlaskClient) -> None:
+        resp = client.get("/api/members/lookup?email=nobody@example.com")
+        assert resp.status_code == 404
+
+
 class TestGetActivePolicyForMember:
     """GET /api/members/<id>/policies/active"""
 
