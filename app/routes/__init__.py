@@ -1,5 +1,6 @@
 from flask import Flask
 
+from .claims import bp as claims_bp
 from .members import bp as members_bp
 from .plans import bp as plans_bp
 from .policies import bp as policies_bp
@@ -16,3 +17,4 @@ def register_routes(app: Flask) -> None:
     app.register_blueprint(providers_bp)
     app.register_blueprint(plans_bp)
     app.register_blueprint(policies_bp)
+    app.register_blueprint(claims_bp)
