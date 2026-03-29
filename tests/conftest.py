@@ -25,7 +25,7 @@ from config.settings import TestingConfig
 
 
 @pytest.fixture()
-def app() -> Generator[Flask, None, None]:
+def app() -> Generator[Flask]:
     """Create an application instance backed by an in-memory SQLite database.
 
     Yields:
