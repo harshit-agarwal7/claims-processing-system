@@ -135,6 +135,44 @@ class TestLookupMemberByEmail:
         assert resp.status_code == 404
 
 
+class TestListMembers:
+    """GET /api/members"""
+
+    def test_returns_empty_list_when_no_members(self, client: FlaskClient) -> None:
+        resp = client.get("/api/members")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    def test_returns_created_member(self, client: FlaskClient) -> None:
+        client.post(
+            "/api/members",
+            json={
+                "name": "List Test",
+                "date_of_birth": "1985-06-15",
+                "email": "listtest@example.com",
+            },
+        )
+        resp = client.get("/api/members")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["email"] == "listtest@example.com"
+        assert data[0]["name"] == "List Test"
+
+    def test_returns_multiple_members(self, client: FlaskClient) -> None:
+        client.post(
+            "/api/members",
+            json={"name": "Alpha", "date_of_birth": "1990-01-01", "email": "alpha@example.com"},
+        )
+        client.post(
+            "/api/members",
+            json={"name": "Beta", "date_of_birth": "1992-02-02", "email": "beta@example.com"},
+        )
+        resp = client.get("/api/members")
+        assert resp.status_code == 200
+        assert len(resp.get_json()) == 2
+
+
 class TestGetActivePolicyForMember:
     """GET /api/members/<id>/policies/active"""
 

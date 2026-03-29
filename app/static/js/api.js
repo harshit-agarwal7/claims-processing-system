@@ -13,6 +13,7 @@ async function request(method, path, body = null) {
 
 export const api = {
     // Members
+    listMembers: () => request("GET", "/members"),
     lookupMemberByEmail: (email) => request("GET", `/members/lookup?email=${encodeURIComponent(email)}`),
     createMember: (data) => request("POST", "/members", data),
     getMember: (id) => request("GET", `/members/${id}`),

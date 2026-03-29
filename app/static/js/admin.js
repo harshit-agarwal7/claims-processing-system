@@ -312,7 +312,72 @@ createPolicyBtn.addEventListener("click", async () => {
     }
 });
 
+// ════════════════════════════════════════════════════════
+// Members tab
+// ════════════════════════════════════════════════════════
+const membersList     = document.getElementById("members-list");
+const memberFormError = document.getElementById("member-form-error");
+const memberFormMsg   = document.getElementById("member-form-msg");
+const createMemberBtn = document.getElementById("create-member-btn");
+
+async function loadMembers() {
+    membersList.innerHTML = `<div class="skeleton" style="height:60px"></div>`;
+    try {
+        const members = await api.listMembers();
+        if (members.length === 0) {
+            membersList.innerHTML = `<div class="empty-state">No members yet.</div>`;
+        } else {
+            membersList.innerHTML = `
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Name</th><th>Email</th><th>Date of Birth</th><th>Phone</th><th>ID</th></tr></thead>
+                        <tbody>
+                            ${members.map(m => `
+                                <tr>
+                                    <td>${m.name}</td>
+                                    <td>${m.email}</td>
+                                    <td>${m.date_of_birth}</td>
+                                    <td>${m.phone ?? "—"}</td>
+                                    <td class="id-mono">${m.id.slice(0, 8)}…</td>
+                                </tr>`).join("")}
+                        </tbody>
+                    </table>
+                </div>`;
+        }
+    } catch (err) {
+        showError(membersList, err.message);
+    }
+}
+
+createMemberBtn.addEventListener("click", async () => {
+    const name  = document.getElementById("member-name").value.trim();
+    const dob   = document.getElementById("member-dob").value;
+    const email = document.getElementById("member-email").value.trim();
+    const phone = document.getElementById("member-phone").value.trim();
+    memberFormError.innerHTML = "";
+
+    if (!name || !dob || !email) { showError(memberFormError, "Name, date of birth, and email are required."); return; }
+
+    createMemberBtn.disabled = true;
+    createMemberBtn.textContent = "Creating…";
+    try {
+        await api.createMember({ name, date_of_birth: dob, email, phone: phone || null });
+        showSuccess(memberFormMsg, `Member "${name}" created.`);
+        document.getElementById("member-name").value = "";
+        document.getElementById("member-dob").value = "";
+        document.getElementById("member-email").value = "";
+        document.getElementById("member-phone").value = "";
+        await loadMembers();
+    } catch (err) {
+        showError(memberFormError, err.message);
+    } finally {
+        createMemberBtn.disabled = false;
+        createMemberBtn.textContent = "Create Member";
+    }
+});
+
 // ── Init ─────────────────────────────────────────────────
 loadPlans();
 loadProviders();
 populatePlanSelect();
+loadMembers();

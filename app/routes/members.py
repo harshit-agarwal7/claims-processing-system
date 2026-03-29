@@ -54,6 +54,23 @@ def _serialize_policy(policy: Policy) -> dict[str, object]:
     }
 
 
+@bp.route("", methods=["GET"])
+def list_members() -> Response:
+    """List all active members.
+
+    Returns:
+        200 with a list of member objects.
+    """
+    members = (
+        db.session.execute(
+            db.select(Member).where(Member.deleted_at.is_(None)).order_by(Member.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return jsonify([_serialize_member(m) for m in members])
+
+
 @bp.route("", methods=["POST"])
 def create_member() -> tuple[Response, int]:
     """Create a new member.
