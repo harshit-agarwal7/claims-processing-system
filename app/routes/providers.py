@@ -30,6 +30,19 @@ def _serialize_provider(provider: Provider) -> dict[str, object]:
     }
 
 
+@bp.route("", methods=["GET"])
+def list_providers() -> Response:
+    """List all active providers.
+
+    Returns:
+        200 with a list of providers.
+    """
+    providers = (
+        db.session.execute(db.select(Provider).where(Provider.deleted_at.is_(None))).scalars().all()
+    )
+    return jsonify([_serialize_provider(p) for p in providers])
+
+
 @bp.route("", methods=["POST"])
 def create_provider() -> tuple[Response, int]:
     """Create a new provider.

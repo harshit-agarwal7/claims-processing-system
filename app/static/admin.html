@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin — Claims Processing</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+
+<nav class="nav">
+    <a href="/" class="nav__brand">Claims Processing</a>
+    <a href="/" class="nav__link">Dashboard</a>
+    <a href="/admin" class="nav__link active">Admin</a>
+</nav>
+
+<main class="page">
+    <div class="page__header">
+        <h1 class="page__title">Admin Panel</h1>
+    </div>
+
+    <div class="tabs">
+        <button class="tab-btn active" data-tab="tab-plans">Plans</button>
+        <button class="tab-btn" data-tab="tab-providers">Providers</button>
+        <button class="tab-btn" data-tab="tab-policies">Policies</button>
+    </div>
+
+    <!-- ── Plans ──────────────────────────────────── -->
+    <div id="tab-plans" class="tab-panel active">
+
+        <!-- Create plan form -->
+        <div class="card">
+            <div class="card__title">Create Plan</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="plan-name">Plan Name</label>
+                    <input id="plan-name" class="form-control" placeholder="e.g. Gold PPO">
+                </div>
+                <div class="form-group">
+                    <label for="plan-deductible">Annual Deductible ($)</label>
+                    <input id="plan-deductible" class="form-control" type="number" min="0" step="0.01" placeholder="e.g. 500">
+                </div>
+            </div>
+            <div id="plan-form-error"></div>
+            <div id="plan-form-msg"></div>
+            <button id="create-plan-btn" class="btn btn-primary">Create Plan</button>
+        </div>
+
+        <!-- Plans list -->
+        <div>
+            <div class="card__title" style="margin-bottom:10px">Existing Plans</div>
+            <div id="plans-list"></div>
+        </div>
+    </div>
+
+    <!-- ── Providers ──────────────────────────────── -->
+    <div id="tab-providers" class="tab-panel">
+
+        <!-- Create provider form -->
+        <div class="card">
+            <div class="card__title">Create Provider</div>
+            <div class="form-row-3">
+                <div class="form-group">
+                    <label for="provider-name">Name</label>
+                    <input id="provider-name" class="form-control" placeholder="e.g. City Medical Center">
+                </div>
+                <div class="form-group">
+                    <label for="provider-npi">NPI</label>
+                    <input id="provider-npi" class="form-control" placeholder="10-digit NPI">
+                </div>
+                <div class="form-group">
+                    <label for="provider-type">Type</label>
+                    <select id="provider-type" class="form-control">
+                        <option value="individual">Individual</option>
+                        <option value="facility">Facility</option>
+                    </select>
+                </div>
+            </div>
+            <div id="provider-form-error"></div>
+            <div id="provider-form-msg"></div>
+            <button id="create-provider-btn" class="btn btn-primary">Create Provider</button>
+        </div>
+
+        <!-- Providers list -->
+        <div>
+            <div class="card__title" style="margin-bottom:10px">Existing Providers</div>
+            <div id="providers-list"></div>
+        </div>
+    </div>
+
+    <!-- ── Policies ───────────────────────────────── -->
+    <div id="tab-policies" class="tab-panel">
+        <div class="card">
+            <div class="card__title">Create Policy</div>
+
+            <!-- Member lookup -->
+            <div class="form-group">
+                <label for="policy-member-input">Member (ID or email)</label>
+                <div style="display:flex;gap:8px">
+                    <input id="policy-member-input" class="form-control" placeholder="Member ID or email address">
+                    <button id="member-lookup-btn" class="btn btn-outline" type="button">Look Up</button>
+                </div>
+            </div>
+            <div id="member-lookup-result" style="margin-bottom:12px"></div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="policy-plan-id">Plan</label>
+                    <select id="policy-plan-id" class="form-control">
+                        <option value="">Select plan…</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="policy-start">Start Date</label>
+                    <input id="policy-start" class="form-control" type="date">
+                </div>
+                <div class="form-group">
+                    <label for="policy-end">End Date</label>
+                    <input id="policy-end" class="form-control" type="date">
+                </div>
+            </div>
+
+            <div id="policy-form-error"></div>
+            <div id="policy-form-msg"></div>
+            <button id="create-policy-btn" class="btn btn-primary">Create Policy</button>
+        </div>
+    </div>
+</main>
+
+<script type="module" src="/static/js/admin.js"></script>
+</body>
+</html>

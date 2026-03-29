@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claims Dashboard</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+
+<nav class="nav">
+    <a href="/" class="nav__brand">Claims Processing</a>
+    <a href="/" class="nav__link active">Dashboard</a>
+    <a href="/admin" class="nav__link">Admin</a>
+</nav>
+
+<main class="page">
+    <div class="page__header">
+        <h1 class="page__title">Member Dashboard</h1>
+        <button id="new-claim-btn" class="btn btn-primary hidden">+ New Claim</button>
+    </div>
+
+    <!-- Member lookup -->
+    <div class="card">
+        <div class="card__title">Look Up Member</div>
+        <div class="search-bar">
+            <input id="member-input" class="form-control" placeholder="Member ID or email address" style="max-width:360px">
+            <button id="load-btn" class="btn btn-primary">Load Claims</button>
+        </div>
+        <div id="member-card" class="hidden" style="margin-top:16px"></div>
+    </div>
+
+    <!-- Claims table -->
+    <div id="claims-section" class="card hidden">
+        <div class="card__title">Claims</div>
+        <div id="claims-error"></div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Claim ID</th>
+                        <th>Date of Service</th>
+                        <th>Status</th>
+                        <th>Provider</th>
+                        <th class="text-right">Total Billed</th>
+                        <th class="text-right">Plan Pays</th>
+                    </tr>
+                </thead>
+                <tbody id="claims-body"></tbody>
+            </table>
+        </div>
+    </div>
+</main>
+
+<!-- New Claim Modal -->
+<div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+        <div class="modal__header">
+            <h2 class="modal__title">Submit New Claim</h2>
+            <button id="modal-close" class="modal__close" type="button">&times;</button>
+        </div>
+
+        <form id="claim-form">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="provider-id">Provider</label>
+                    <select id="provider-id" class="form-control">
+                        <option value="">Select provider…</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="date-of-service">Date of Service</label>
+                    <input id="date-of-service" class="form-control" type="date" required>
+                </div>
+            </div>
+
+            <hr class="divider">
+            <div class="card__title" style="margin-bottom:10px">Line Items</div>
+            <div id="line-items-wrap" class="line-items-editor"></div>
+            <button id="add-line-item" type="button" class="btn btn-outline btn-sm">+ Add Line Item</button>
+
+            <div id="claim-form-error" style="margin-top:12px"></div>
+
+            <div class="form-actions">
+                <button id="submit-claim-btn" type="submit" class="btn btn-primary">Submit Claim</button>
+                <button type="button" class="btn btn-outline" onclick="document.getElementById('modal-overlay').classList.add('hidden')">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script type="module" src="/static/js/dashboard.js"></script>
+</body>
+</html>

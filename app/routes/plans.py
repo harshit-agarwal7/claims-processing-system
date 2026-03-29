@@ -71,6 +71,17 @@ def _parse_coverage_percentage(raw: object, label: str) -> Decimal:
     return pct
 
 
+@bp.route("", methods=["GET"])
+def list_plans() -> Response:
+    """List all active plans with their coverage rules.
+
+    Returns:
+        200 with a list of plans.
+    """
+    plans = db.session.execute(db.select(Plan).where(Plan.deleted_at.is_(None))).scalars().all()
+    return jsonify([_serialize_plan(p) for p in plans])
+
+
 @bp.route("", methods=["POST"])
 def create_plan() -> tuple[Response, int]:
     """Create a new plan with optional coverage rules.
